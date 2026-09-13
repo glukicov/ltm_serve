@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Nothing here writes to the repository.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint, format and shell scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      # No python-version here: uv reads .python-version. Only the dev group (ruff, mypy, pytest) is installed.
+      - name: Install the development toolchain
+        run: uv sync --locked --only-dev
+
+      - name: Lint
+        run: uv run --no-sync ruff check --output-format github .
+
+      - name: Format
+        run: uv run --no-sync ruff format --check .
+
+      # kctl is a bash script without the .sh extension.
+      - name: Shellcheck
+        run: |
+          git ls-files -z '*.sh' | xargs -0 shellcheck
+          shellcheck k8s/gke/kctl
+
+      - name: Shell syntax
+        run: |
+          git ls-files -z '*.sh' | xargs -0 -n1 bash -n
+          bash -n k8s/gke/kctl
+
+  test:
+    name: Types (mypy) and tests
+    runs-on: ubuntu-latest
+    env:
+      # `uv run` would otherwise re-sync the environment and swap the CPU torch below for the locked CUDA build.
+      UV_NO_SYNC: "1"
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      # CPU-only PyTorch. uv.lock pins torch from PyPI, whose Linux wheels bring ~3 GB of CUDA 13 libraries
+      # (nvidia-*, cuda-*, triton) that neither mypy nor the fast tests use. `uv sync` has no --torch-backend, and
+      # pointing torch at the CPU index in pyproject.toml would change the lock for everyone on Linux, GPU hosts
+      # included. So: install everything else exactly as locked (--locked still fails on a stale uv.lock), skip
+      # torch and its CUDA wheels (the same filter as docker/requirements.sh), then install the CPU build of the
+      # locked torch version.
+      - name: Install the project with CPU-only PyTorch
+        run: |
+          locked=$(uv export --locked --all-extras --no-emit-project --no-hashes)
+          skip=()
+          while read -r package; do
+            skip+=(--no-install-package "$package")
+          done < <(grep -oE '^(torch|triton|nvidia-[a-z0-9-]+|cuda-[a-z0-9-]+)==' <<<"$locked" | sed 's/==$//')
+          uv sync --locked --all-extras "${skip[@]}"
+          uv pip install --torch-backend cpu "$(grep -oE '^torch==[^ ;]+' <<<"$locked")"
+
+      - name: Types
+        run: uv run mypy src tests
+
+      # The slow tests download the 6.6 GB checkpoint and run the real model; they are run by hand.
+      - name: Tests
+        run: uv run pytest -m "not slow"

@@ -8,6 +8,13 @@ authors = [
     { name = "Gleb Lukicov" }
 ]
 requires-python = ">=3.12"
+keywords = ["tabfm", "tabular-foundation-model", "inference", "model-serving", "triton", "kserve", "kubernetes", "pytorch"]
+classifiers = [
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "tabfm[pytorch]>=1.0.1",
     # huggingface_hub's PyTorchModelHubMixin reads the checkpoint with it but tabfm does not declare it.
@@ -38,6 +45,11 @@ dev = [
     "pytest>=8.3",
     "pandas-stubs>=2.2",
 ]
+
+[project.urls]
+Homepage = "https://github.com/glukicov/ltm_serve"
+Repository = "https://github.com/glukicov/ltm_serve"
+Documentation = "https://github.com/glukicov/ltm_serve/blob/main/docs/WRITEUP.md"
 
 [project.scripts]
 ltm-serve = "ltm_serve.cli:app"

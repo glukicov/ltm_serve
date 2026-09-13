@@ -31,3 +31,6 @@ results/logs/
 .ruff_cache/
 .mypy_cache/
 .pytest_cache/
+
+# Article and social drafts (not published with the repo)
+drafts/
