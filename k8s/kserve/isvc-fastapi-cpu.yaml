@@ -1,0 +1,48 @@
+# KServe InferenceService, custom-container predictor: our FastAPI service (it speaks Open Inference Protocol v2).
+# Standard (raw Deployment) mode: a plain Deployment + Service + autoscaler, no Knative/Istio in the request path.
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: tabfm-fastapi
+  namespace: ltm
+  annotations:
+    serving.kserve.io/deploymentMode: Standard
+    serving.kserve.io/autoscalerClass: none # a single CPU replica fits in the kind node; GKE adds KEDA
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8080"
+    prometheus.io/path: /metrics
+spec:
+  predictor:
+    minReplicas: 1
+    maxReplicas: 1
+    containers:
+      - name: kserve-container
+        image: ltm-serve:cpu
+        imagePullPolicy: IfNotPresent
+        env:
+          # pvc:// mounts the claim at /mnt/models without copying (a gs:// URI would download first).
+          - name: STORAGE_URI
+            value: pvc://tabfm-weights/tabfm-fp32
+          - name: LTM_CHECKPOINT_DIR
+            value: /mnt/models
+          - name: LTM_DEVICE
+            value: cpu
+          - name: LTM_DTYPE
+            value: fp32 # bf16 is ~10x slower than fp32 on ARM CPUs without bf16 matmul kernels
+          - name: LTM_TORCH_THREADS
+            value: "6"
+          - name: LTM_DEMO_CONTEXT
+            value: demo:n_train=512,n_features=10,n_classes=2,n_estimators=4
+        ports:
+          - containerPort: 8080
+            protocol: TCP
+        startupProbe: # weights + context encoding take ~1 min on CPU; don't let liveness kill a warming pod
+          httpGet: { path: /v2/models/demo/ready, port: 8080 }
+          periodSeconds: 5
+          failureThreshold: 120
+        readinessProbe:
+          httpGet: { path: /v2/models/demo/ready, port: 8080 }
+          periodSeconds: 5
+        resources:
+          requests: { cpu: "6", memory: 9Gi }
+          limits: { cpu: "6", memory: 11Gi } # explicit: KServe otherwise injects cpu: 1

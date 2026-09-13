@@ -1,0 +1,77 @@
+# FastAPI TabFM on one NVIDIA L4, weights pulled from GCS by KServe's storage initializer, autoscaled by KEDA on
+# in-flight requests scraped from the pods by Prometheus. ${IMAGE}/${BUCKET}/etc. are filled by envsubst.
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: tabfm-fastapi
+  namespace: ltm
+  annotations:
+    serving.kserve.io/deploymentMode: Standard
+    serving.kserve.io/autoscalerClass: keda
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8080"
+    prometheus.io/path: /metrics
+spec:
+  predictor:
+    # One GPU and no quota for a second: a rolling update would surge a new pod that can never schedule.
+    # Recreate stops the old pod first (brief downtime) — the price of single-GPU capacity.
+    deploymentStrategy:
+      type: Recreate
+    minReplicas: ${MIN_REPLICAS}
+    maxReplicas: ${MAX_REPLICAS}
+    autoScaling:
+      metrics:
+        - type: External
+          external:
+            metric:
+              backend: prometheus
+              serverAddress: http://prometheus-server.monitoring.svc.cluster.local
+              # Average in-flight requests per ready replica over the last 30 s.
+              query: avg(avg_over_time(ltm_inflight_requests{namespace="ltm"}[30s]))
+            target:
+              type: Value
+              value: "${TARGET_INFLIGHT}"
+    tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+    nodeSelector:
+      cloud.google.com/gke-accelerator: nvidia-l4
+    containers:
+      - name: kserve-container
+        image: ${IMAGE}
+        imagePullPolicy: Always # the tag is reused across Cloud Build runs; IfNotPresent would keep a stale image
+        env:
+          # GKE mounts the node's NVIDIA driver at /usr/local/nvidia; NVIDIA base images already point the loader
+          # there, python:3.12-slim does not, so torch would report "no NVIDIA driver".
+          - name: LD_LIBRARY_PATH
+            value: /usr/local/nvidia/lib64
+          - name: STORAGE_URI
+            value: gs://${BUCKET}/tabfm-bf16
+          - name: LTM_CHECKPOINT_DIR
+            value: /mnt/models
+          - name: LTM_DEVICE
+            value: cuda
+          - name: LTM_DTYPE
+            value: bf16
+          - name: LTM_MAX_BATCH_ROWS
+            value: "${MAX_BATCH_ROWS}"
+          - name: LTM_MAX_DELAY_MS
+            value: "${MAX_DELAY_MS}"
+          - name: LTM_DEMO_CONTEXT
+            value: ${DEMO_CONTEXT}
+          - name: LTM_COMPILE_MODE # "" = eager; "reduce-overhead" = torch.compile + CUDA graphs, warmed up before ready
+            value: "${COMPILE_MODE}"
+        ports:
+          - containerPort: 8080
+            protocol: TCP
+        startupProbe:
+          httpGet: { path: /v2/models/demo/ready, port: 8080 }
+          periodSeconds: 5
+          failureThreshold: 360 # 30 min: compile warm-up of 9 row buckets alone took ~7 min on an L4
+        readinessProbe:
+          httpGet: { path: /v2/models/demo/ready, port: 8080 }
+          periodSeconds: 5
+        resources:
+          requests: { cpu: "3", memory: 20Gi, nvidia.com/gpu: "1" }
+          limits: { cpu: "7", memory: 26Gi, nvidia.com/gpu: "1" } # explicit: KServe otherwise injects cpu: 1

@@ -1,0 +1,74 @@
+# Triton on one NVIDIA L4 as a KServe ServingRuntime. Same weights, same context, same v2 protocol as the FastAPI
+# deployment, so the two are directly comparable with the same load generator.
+apiVersion: serving.kserve.io/v1alpha1
+kind: ServingRuntime
+metadata:
+  name: ltm-triton-gpu
+  namespace: ltm
+spec:
+  supportedModelFormats:
+    - name: tabfm-triton
+      version: "1"
+      autoSelect: true
+  protocolVersions: [v2, grpc-v2]
+  containers:
+    - name: kserve-container
+      image: ${IMAGE}
+      imagePullPolicy: Always # the tag is reused across Cloud Build runs; IfNotPresent would keep a stale image
+      args:
+        - tritonserver
+        - --model-repository=/model_repository
+        - --http-port=8080
+        - --grpc-port=9000
+        - --metrics-port=8002
+        - --allow-metrics=true
+        # Explicit model control: models are (re)loaded through the repository API, which can override config.pbtxt
+        # at load time (instance count, batching delay) without rebuilding the image or restarting the pod.
+        - --model-control-mode=explicit
+        - --load-model=tabfm
+      env:
+        - name: LTM_CHECKPOINT_DIR
+          value: /mnt/models
+        - name: LTM_DTYPE
+          value: bf16
+        - name: LTM_CONTEXT
+          value: ${TRITON_CONTEXT}
+        - name: LTM_COMPILE_MODE
+          value: "${COMPILE_MODE}"
+      ports:
+        - containerPort: 8080
+          protocol: TCP
+      resources:
+        requests: { cpu: "3", memory: 20Gi, nvidia.com/gpu: "1" }
+        limits: { cpu: "7", memory: 26Gi, nvidia.com/gpu: "1" } # explicit: KServe otherwise injects cpu: 1
+---
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: tabfm-triton
+  namespace: ltm
+  annotations:
+    serving.kserve.io/deploymentMode: Standard
+    serving.kserve.io/autoscalerClass: none
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8002"
+    prometheus.io/path: /metrics
+spec:
+  predictor:
+    # One GPU and no quota for a second: a rolling update would surge a new pod that can never schedule.
+    # Recreate stops the old pod first (brief downtime) — the price of single-GPU capacity.
+    deploymentStrategy:
+      type: Recreate
+    minReplicas: 1
+    maxReplicas: 1
+    tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+    nodeSelector:
+      cloud.google.com/gke-accelerator: nvidia-l4
+    model:
+      modelFormat:
+        name: tabfm-triton
+      runtime: ltm-triton-gpu
+      storageUri: gs://${BUCKET}/tabfm-bf16

@@ -1,0 +1,64 @@
+# Build the CUDA images natively on amd64 inside GCP (no multi-GB upload from a laptop, no QEMU emulation) and
+# produce the bf16 checkpoint next to the bucket it will be served from.
+#
+#   gcloud builds submit --config k8s/gke/cloudbuild.yaml --substitutions _REGION=us-central1,_BUCKET=... .
+substitutions:
+  _REGION: us-central1
+  _REPO: ltm-serve
+  _BUCKET: ""
+options:
+  machineType: E2_HIGHCPU_32 # 32 GB RAM: exporting loads the 6.6 GB fp32 checkpoint before casting
+  diskSizeGb: 200
+  logging: CLOUD_LOGGING_ONLY
+timeout: 5400s
+steps:
+  - id: service-image
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - docker/service.Dockerfile
+      - --build-arg
+      - TORCH_VARIANT=cu126
+      - -t
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/ltm-serve:cu126
+      - .
+  - id: triton-image
+    name: gcr.io/cloud-builders/docker
+    waitFor: ["-"]
+    args:
+      - build
+      - -f
+      - docker/triton.Dockerfile
+      - --build-arg
+      - TORCH_VARIANT=cu126
+      - --build-arg
+      - INSTANCE_KIND=KIND_GPU
+      - -t
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/ltm-triton:cu126
+      - .
+  - id: export-bf16
+    name: gcr.io/cloud-builders/docker
+    waitFor: [service-image]
+    args:
+      - run
+      - --rm
+      - --user=root
+      - -v=/workspace/ckpt:/ckpt
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/ltm-serve:cu126
+      - ltm-serve
+      - export-checkpoint
+      - /ckpt/tabfm-bf16
+      - --dtype=bf16
+  - id: upload-bf16
+    name: gcr.io/cloud-builders/gcloud
+    waitFor: [export-bf16]
+    args:
+      - storage
+      - cp
+      - --recursive
+      - /workspace/ckpt/tabfm-bf16
+      - gs://${_BUCKET}/
+images:
+  - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/ltm-serve:cu126
+  - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/ltm-triton:cu126

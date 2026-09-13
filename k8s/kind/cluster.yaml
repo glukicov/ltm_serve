@@ -1,0 +1,12 @@
+# Local cluster for the KServe phase. The host's checkpoint directory is mounted into the node so pods can read
+# the 6.6 GB weights through a hostPath-backed PersistentVolume instead of copying them into every image.
+# Rendered by k8s/kind/up.sh (envsubst fills CHECKPOINTS_DIR).
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: ltm
+nodes:
+  - role: control-plane
+    extraMounts:
+      - hostPath: ${CHECKPOINTS_DIR}
+        containerPath: /models
+        readOnly: true

@@ -1,0 +1,38 @@
+# TabFM behind Triton's Python backend, one pre-encoded synthetic context.
+name: "tabfm"
+backend: "python"
+
+# Batch dimension = query rows. A request of shape [n, 10] counts as n towards max_batch_size.
+max_batch_size: 256
+input [
+  {
+    name: "ROWS"
+    data_type: TYPE_FP32
+    dims: [ 10 ]
+  }
+]
+output [
+  {
+    name: "PROBABILITIES"
+    data_type: TYPE_FP32
+    dims: [ 2 ]
+  }
+]
+
+# Merge concurrent requests into one execute() call. Exact for TabFM (query rows are independent).
+# max_queue_delay trades a little latency at low load for bigger batches; tuned in the Triton benchmark.
+dynamic_batching {
+  max_queue_delay_microseconds: 0
+}
+
+# One copy of the model per instance: on CPU each instance is another ~7 GB of fp32 weights.
+instance_group [
+  {
+    count: 1
+    kind: KIND_CPU
+  }
+]
+
+parameters: { key: "context" value: { string_value: "synthetic:n_train=512,n_features=10,n_classes=2,n_estimators=4" } }
+parameters: { key: "dtype" value: { string_value: "fp32" } }
+parameters: { key: "checkpoint_dir" value: { string_value: "/models/tabfm-fp32" } }

@@ -1,0 +1,41 @@
+# In-cluster load generator on the CPU system node, so measured latency excludes the laptop-to-GCP round trip.
+# --procs spreads the client over several cores.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: loadgen-${NAME}
+  namespace: ltm
+  annotations:
+    # A bare Pod has no controller, so the cluster autoscaler refuses to evict it and the GPU node could never
+    # scale down while it exists (GKE: "Pod is blocking scale down because it's not backed by a controller").
+    cluster-autoscaler.kubernetes.io/safe-to-evict: "true"
+spec:
+  restartPolicy: Never
+  # LOADGEN_POOL=l4 runs the client on the GPU node's spare cores when the 4-core system node would cap the test.
+  nodeSelector:
+    cloud.google.com/gke-nodepool: ${LOADGEN_POOL}
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule
+  containers:
+    - name: loadgen
+      image: ${IMAGE}
+      workingDir: /tmp
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          python /opt/loadgen/loadgen.py --procs ${PROCS} --url ${URL} --model ${MODEL} --input-name ${INPUT_NAME} --protocol v2 \
+            --rows ${ROWS} --rates ${RATES} --duration ${DURATION} --warmup 10 --label ${NAME} --out /tmp/load.jsonl
+          echo LOAD_DONE
+          sleep 1800
+      # loadgen.py is mounted from a ConfigMap so the client can be iterated on without rebuilding the image.
+      volumeMounts:
+        - name: loadgen
+          mountPath: /opt/loadgen
+      resources:
+        requests: { cpu: "${CLIENT_CPU}", memory: 2Gi }
+  volumes:
+    - name: loadgen
+      configMap:
+        name: loadgen

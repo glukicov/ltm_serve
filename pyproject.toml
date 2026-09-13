@@ -1,0 +1,68 @@
+[project]
+name = "ltm-serve"
+version = "0.1.0"
+description = "Benchmarking, optimising and serving TabFM for low-latency online inference"
+readme = "README.md"
+license = "Apache-2.0"
+authors = [
+    { name = "Gleb Lukicov" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "tabfm[pytorch]>=1.0.1",
+    # huggingface_hub's PyTorchModelHubMixin reads the checkpoint with it but tabfm does not declare it.
+    "safetensors>=0.4.3",
+    "numpy>=2.0",
+    "pandas>=2.2",
+    "scikit-learn>=1.5",
+    "typer>=0.12",
+]
+
+[project.optional-dependencies]
+serve = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.8",
+    "prometheus-client>=0.20",
+    "httpx>=0.27",
+]
+bench = [
+    "pyarrow>=17",
+    "matplotlib>=3.9",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "pytest>=8.3",
+    "pandas-stubs>=2.2",
+]
+
+[project.scripts]
+ltm-serve = "ltm_serve.cli:app"
+
+[build-system]
+requires = ["uv_build>=0.12.13,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+extend-exclude = ["results"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+strict = true
+python_version = "3.12"
+exclude = ["^results/", "^build/"]
+
+[[tool.mypy.overrides]]
+module = ["tabfm.*", "sklearn.*", "scipy.*", "matplotlib.*", "tritonclient.*", "triton_python_backend_utils", "kserve.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["slow: loads the 1.6B-parameter TabFM checkpoint"]

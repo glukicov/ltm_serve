@@ -1,0 +1,45 @@
+# Run the benchmark sweeps on the L4 as a pod (results stay in /results; copied out with kubectl cp before the
+# pod's sleep ends). Weights come straight from Hugging Face inside GCP, which is faster than any laptop upload.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: bench-cuda
+  namespace: ltm
+  annotations:
+    # A bare Pod has no controller, so the cluster autoscaler refuses to evict it and the GPU node could never
+    # scale down while it exists (GKE: "Pod is blocking scale down because it's not backed by a controller").
+    cluster-autoscaler.kubernetes.io/safe-to-evict: "true"
+spec:
+  restartPolicy: Never
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule
+  nodeSelector:
+    cloud.google.com/gke-accelerator: nvidia-l4
+  securityContext:
+    runAsUser: 0 # to apt-get install gcc; this is a throwaway benchmark pod, not a serving workload
+  containers:
+    - name: bench
+      image: ${IMAGE}
+      workingDir: /tmp
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          set -e
+          # torch.compile's Triton kernels need a C compiler, which python:3.12-slim does not ship.
+          apt-get update -qq && apt-get install -y -qq gcc >/dev/null
+          python -c "import ltm_serve.bench as b; print('results in', b.RESULTS_DIR)"
+          ltm-serve bench ${SWEEPS} --device cuda --dtype bf16 --suffix _cuda 2>&1 | grep -v -E "Fetching|Loading"
+          echo BENCH_DONE
+          sleep 3600
+      env:
+        # GKE mounts the node's NVIDIA driver at /usr/local/nvidia; NVIDIA base images already point the loader
+        # there, python:3.12-slim does not, so torch would report "no NVIDIA driver".
+        - name: LD_LIBRARY_PATH
+          value: /usr/local/nvidia/lib64
+        - name: HF_HOME
+          value: /tmp/hf
+      resources:
+        requests: { cpu: "6", memory: 20Gi, nvidia.com/gpu: "1" }
+        limits: { cpu: "7", memory: 26Gi, nvidia.com/gpu: "1" } # explicit: KServe otherwise injects cpu: 1

@@ -1,0 +1,13 @@
+# Cloud Build source upload: only what the Dockerfiles need.
+.git/
+.venv/
+results/
+docs/
+data/
+tests/
+**/__pycache__/
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.env
+.env.*

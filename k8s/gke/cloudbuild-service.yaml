@@ -1,0 +1,25 @@
+# Rebuild only the CUDA service image (code changes that do not touch Triton or the checkpoint).
+#
+#   gcloud builds submit --config k8s/gke/cloudbuild-service.yaml .
+substitutions:
+  _REGION: us-central1
+  _REPO: ltm-serve
+options:
+  machineType: E2_HIGHCPU_8
+  diskSizeGb: 100
+  logging: CLOUD_LOGGING_ONLY
+timeout: 5400s
+steps:
+  - id: service-image
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - docker/service.Dockerfile
+      - --build-arg
+      - TORCH_VARIANT=cu126
+      - -t
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/ltm-serve:cu126
+      - .
+images:
+  - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/ltm-serve:cu126

@@ -1,0 +1,61 @@
+# KServe with Triton as a ServingRuntime. The runtime is a reusable template (image, args, ports, protocol);
+# an InferenceService picks it by model format, and KServe wires the storage mount and probes around it.
+apiVersion: serving.kserve.io/v1alpha1
+kind: ServingRuntime
+metadata:
+  name: ltm-triton-cpu
+  namespace: ltm
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8002"
+    prometheus.io/path: /metrics
+spec:
+  supportedModelFormats:
+    - name: tabfm-triton
+      version: "1"
+      autoSelect: true
+  protocolVersions: [v2, grpc-v2]
+  containers:
+    - name: kserve-container
+      image: ltm-triton:cpu
+      imagePullPolicy: IfNotPresent
+      # Model code/config live in the image (/model_repository); weights come from storageUri (/mnt/models).
+      args:
+        - tritonserver
+        - --model-repository=/model_repository
+        - --http-port=8080
+        - --grpc-port=9000
+        - --metrics-port=8002
+        - --allow-metrics=true
+      env:
+        - name: LTM_CHECKPOINT_DIR
+          value: /mnt/models
+        - name: OMP_NUM_THREADS
+          value: "6"
+      ports:
+        - containerPort: 8080
+          protocol: TCP
+      resources:
+        requests: { cpu: "6", memory: 9Gi }
+        limits: { cpu: "6", memory: 11Gi } # explicit: KServe otherwise injects cpu: 1
+---
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: tabfm-triton
+  namespace: ltm
+  annotations:
+    serving.kserve.io/deploymentMode: Standard
+    serving.kserve.io/autoscalerClass: none
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8002"
+    prometheus.io/path: /metrics
+spec:
+  predictor:
+    minReplicas: 1
+    maxReplicas: 1
+    model:
+      modelFormat:
+        name: tabfm-triton
+      runtime: ltm-triton-cpu
+      storageUri: pvc://tabfm-weights/tabfm-fp32

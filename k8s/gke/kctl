@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# kubectl against the GKE cluster via the project's dedicated kubeconfig.
+PROJECT="${PROJECT:-$(gcloud config get-value project 2>/dev/null || true)}"
+: "${PROJECT:?set PROJECT to your GCP project id (or run: gcloud config set project <id>)}"
+exec kubectl --kubeconfig "${LTM_KUBECONFIG:-$HOME/.kube/ltm-serve}" --context "gke_${PROJECT}_${ZONE:-us-central1-a}_${CLUSTER:-ltm-serve}" "$@"

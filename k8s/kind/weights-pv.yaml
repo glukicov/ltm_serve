@@ -1,0 +1,28 @@
+# Model weights as a read-only volume. KServe mounts `pvc://tabfm-weights/<subdir>` at /mnt/models directly —
+# no storage-initializer copy — which is the fastest cold start available short of baking weights into the node.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: tabfm-weights
+spec:
+  capacity:
+    storage: 20Gi
+  accessModes: [ReadOnlyMany]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+  hostPath:
+    path: /models
+    type: Directory
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: tabfm-weights
+  namespace: ltm
+spec:
+  accessModes: [ReadOnlyMany]
+  storageClassName: manual
+  volumeName: tabfm-weights
+  resources:
+    requests:
+      storage: 20Gi

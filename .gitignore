@@ -1,0 +1,33 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Local artefacts and secrets
+.env
+.env.*
+*.pem
+*-key.json
+kubeconfig*
+.DS_Store
+
+# Model weights and exported checkpoints never belong in the repo
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+*.bin
+*.onnx
+checkpoints/
+
+# Raw run logs (contain cloud project ids, node names, local paths)
+results/logs/
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/

@@ -1,0 +1,40 @@
+# Rebuild both CUDA images (service + Triton) after code changes; the checkpoint in GCS is untouched.
+#
+#   gcloud builds submit --config k8s/gke/cloudbuild-images.yaml .
+substitutions:
+  _REGION: us-central1
+  _REPO: ltm-serve
+options:
+  machineType: E2_HIGHCPU_32 # parallel steps: two image builds at once
+  diskSizeGb: 200
+  logging: CLOUD_LOGGING_ONLY
+timeout: 5400s
+steps:
+  - id: service-image
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - docker/service.Dockerfile
+      - --build-arg
+      - TORCH_VARIANT=cu126
+      - -t
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/ltm-serve:cu126
+      - .
+  - id: triton-image
+    name: gcr.io/cloud-builders/docker
+    waitFor: ["-"]
+    args:
+      - build
+      - -f
+      - docker/triton.Dockerfile
+      - --build-arg
+      - TORCH_VARIANT=cu126
+      - --build-arg
+      - INSTANCE_KIND=KIND_GPU
+      - -t
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/ltm-triton:cu126
+      - .
+images:
+  - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/ltm-serve:cu126
+  - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/ltm-triton:cu126
