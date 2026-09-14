@@ -29,6 +29,14 @@ if ! gcloud container clusters describe "$CLUSTER" --zone "$ZONE" --project "$PR
   gcloud container clusters create "$CLUSTER" --project "$PROJECT" --zone "$ZONE" \
     --release-channel regular --num-nodes 1 --machine-type e2-standard-4 \
     --workload-pool "$PROJECT.svc.id.goog" --enable-image-streaming
+fi
+# Safe to re-run: wait for a cluster that is still provisioning, and create the L4 pool if it is missing.
+until [[ "$(gcloud container clusters describe "$CLUSTER" --zone "$ZONE" --project "$PROJECT" \
+  --format='value(status)')" == RUNNING ]]; do
+  echo "waiting for cluster $CLUSTER to be RUNNING..."
+  sleep 15
+done
+if ! gcloud container node-pools describe l4 --cluster "$CLUSTER" --zone "$ZONE" --project "$PROJECT" >/dev/null 2>&1; then
   gcloud container node-pools create l4 --project "$PROJECT" --cluster "$CLUSTER" --zone "$ZONE" \
     --machine-type g2-standard-8 --accelerator type=nvidia-l4,count=1,gpu-driver-version=latest \
     --enable-autoscaling --num-nodes 0 --min-nodes 0 --max-nodes 2 \

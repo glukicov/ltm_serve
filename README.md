@@ -7,7 +7,7 @@
 [![Python 3.14](https://img.shields.io/badge/python-3.14-blue)](.python-version)
 [![uv](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json)](https://github.com/astral-sh/uv)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
-[![Checked with mypy](https://www.mypy-lang.org/static/mypy_badge.svg)](https://mypy-lang.org/)
+[![mypy --strict](https://img.shields.io/badge/mypy-strict-2a6db2)](https://mypy-lang.org)
 <br>
 [![TabFM](https://img.shields.io/badge/Google-TabFM-4285F4)](https://github.com/google-research/tabfm)
 [![PyTorch](https://img.shields.io/badge/PyTorch-torch.compile-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org)
@@ -15,7 +15,7 @@
 [![KServe](https://img.shields.io/badge/KServe-v0.20-2E5EA8)](https://kserve.github.io/website/)
 [![Kubernetes / GKE](https://img.shields.io/badge/Kubernetes-GKE%20%C2%B7%20L4-326CE5?logo=kubernetes&logoColor=white)](https://cloud.google.com/kubernetes-engine)
 
-**[Results](#results) · [What's inside](#whats-inside) · [Quickstart](#quickstart) · [Layout](#layout) · [Licence](#licence) · [Why](MEDIUM_URL_TBD)**
+**[Results](#results) · [What we learned](#what-we-learned) · [What's inside](#whats-inside) · [Quickstart](#quickstart) · [Layout](#layout) · [Write-up](docs/WRITEUP.md) · [Slides](docs/slides)**
 
 </div>
 
@@ -28,14 +28,32 @@ TabFM learns *in context*: every call sends the labelled training rows and the r
 transformer together. That means no training step, but an online service built on stock TabFM pays for the whole
 context on every request. The fix turns out to be exact, and most of this repo is about what comes after it.
 
-<!-- TODO: replace MEDIUM_URL_TBD (here, in the nav above and in the footer) with the Medium article URL. -->
-The story behind it: **[Medium article — link coming soon](MEDIUM_URL_TBD)** 📖
-<br>
-Not a reader? **[Slides](docs/slides/inference-lessons-2026-09-13.html)** 🎞️ — GitHub shows HTML as source, so
-[view them in the browser](https://htmlpreview.github.io/?https://github.com/glukicov/ltm_serve/blob/main/docs/slides/inference-lessons-2026-09-13.html)
-or download the file and open it locally.
+This is the third repo in a series. [glukicov/ltm](https://github.com/glukicov/ltm) showed TabFM matching a trained
+CatBoost model *without any training*
+([article](https://medium.com/@lukicov/i-tried-to-make-an-llm-fail-on-tabular-data-it-didnt-sort-of-428d89acdb51)),
+and [glukicov/ltm_ft](https://github.com/glukicov/ltm_ft) fine-tuned it on a laptop and on a GPU in GKE
+([article](https://medium.com/@lukicov/i-fine-tuned-a-1-6b-tabular-foundation-model-on-my-laptop-and-a-gpu-in-kubernetes-65c5a5f679c6)).
+This one asks what it takes to serve it.
+
+**TL;DR**
+
+- 🐢 **Stock TabFM re-reads the whole training table on every request.** Its attention masks mean that work can be
+  cached exactly, like an LLM's KV cache: **9.47 s → 129 ms (74×)** at 8,192 context rows, and latency stops
+  depending on context size.
+- 🐍 **Then the GPU sat idle while Python launched kernels.** `torch.compile` + CUDA graphs took the cached forward
+  from **111 ms to 28 ms**.
+- 🤥 **The load generator was the bottleneck, twice.** Triton "collapsed" at 160 req/s and later at 240 req/s while
+  its own queue was empty; with enough client processes, one eager Triton instance held **~400 req/s**.
+- 🔄 **Compiled Triton on one L4: p50 91 ms / p99 125 ms at 160 req/s**, 3× lower latency than eager. A second
+  instance on the same GPU never helped, and compiled it was slower at every load.
+- ☸️ **Kubernetes set the rest of the bill:** 7 min 12 s cold start from zero GPU nodes, a 20–23 min compile
+  warm-up per cold replica, and KEDA scaling straight into *"GCE quota exceeded"*.
 
 **The full write-up is [`docs/WRITEUP.md`](docs/WRITEUP.md)**: every phase, every number, and why.
+
+> Reading not your game? Slides instead: [HTML + PDF](docs/slides) 🖥️ (produced with [SlideOps](https://github.com/glukicov/slideops)).
+> GitHub shows HTML as source, so [view the deck in the browser](https://htmlpreview.github.io/?https://github.com/glukicov/ltm_serve/blob/main/docs/slides/inference-lessons-2026-09-13.html)
+> or open the PDF.
 
 ## Results
 
@@ -63,15 +81,17 @@ latency no longer depends on context size (log-log slope 1.12 → 0.06).
 |---|---:|---:|
 | FastAPI, continuous batcher, eager | 314 / 673 ms | ~285 req/s |
 | FastAPI, compiled | 97 / 137 ms | ~230 req/s |
-| Triton, 1 instance, eager | 262 / 378 ms | ~160 req/s |
+| Triton, 1 instance, eager | 273 / 380 ms | ~400 req/s |
 | Triton, 2 instances on the same GPU, eager | 266 / 410 ms | ~300 req/s |
 | **Triton, 1 instance, compiled** | **91 / 125 ms** | **~350 req/s** |
 | Triton, 2 instances, compiled | 154 / 218 ms | ~320 req/s |
 
 - **Compiling cut latency ~3× and moved the bottleneck.** Compiled FastAPI's knee *dropped*, because one Python
   process (1.05 cores) became the ceiling; Triton's C++ front end keeps request handling out of the model process.
-- **The right instance count flipped.** Eager, a second Triton instance doubled capacity (host Python was the limit);
-  compiled, it made things worse (the GPU was the limit).
+- **Compiling buys latency, not capacity, here.** Eager Triton already reached ~400 req/s by merging ~70 requests
+  per batch; compiled it tops out near 350 req/s but at a third of the latency, which is what makes an SLO reachable.
+- **A second instance per GPU never helped.** Eager it added nothing; compiled it was slower at every load (two
+  instances time-slice one GPU). An earlier "collapse at 160 req/s" was the load generator, and was re-measured.
 - **Cold start is the price.** From zero GPU nodes an eager Triton replica took **7 min 12 s** to become Ready
   (3 m 31 s of it pulling a 13.6 GB image); capturing the compiled shape buckets added a **20–23 min** warm-up per
   cold replica.
@@ -85,6 +105,26 @@ latency no longer depends on context size (log-log slope 1.12 → 0.06).
 > trends, not SLOs. In bf16, "exact" means within stock TabFM's own batch-composition noise, with 100% label
 > agreement. TabFM's pretrained weights are licensed for **non-commercial use only**: fine for learning and
 > benchmarking, not for production.
+
+## What we learned
+
+1. **Read the model before you optimise it.** One property of TabFM's attention masks (rows only attend to the
+   training rows) made both the context cache and cross-request batching *exact*. No generic trick would have found
+   a 74× win.
+2. **For an in-context model, the context is the expensive resource.** Each cached context costs ~198 KB per row per
+   member: 1.6 GB for 1,024 rows and 8 members, so one L4 holds 8–10 of them. Cache bytes, not requests per second,
+   size the fleet first.
+3. **Batching buys throughput; compiling buys latency.** Eager Triton already reached ~400 req/s by merging ~70
+   requests per forward. Compiling did not raise that knee, but cut p99 at 240 req/s from 405 ms to 138 ms, which is
+   what makes a latency SLO reachable.
+4. **Measure the instance count; don't derive it.** "One GIL, so add instances" sounded right and was wrong in both
+   modes: a second instance on the same GPU never helped, and compiled it only time-sliced the GPU.
+5. **Prove the load generator isn't the bottleneck.** Read the server's own queue and GPU utilisation before
+   believing a saturation point. This caught one wrong result during the project and a second one only on an
+   independent re-run.
+6. **Compile warm-up is a cold-start cost.** Capturing the shape buckets took 20–23 min per cold replica, far more
+   than the 13.6 GB image pull, and 206 s when inductor's cache was reused. Autoscale compiled replicas without a
+   persisted cache and the new capacity arrives half an hour late.
 
 ## What's inside
 
@@ -212,6 +252,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 <div align="center">
 <br>
 
-**[Results](#results) · [Write-up](docs/WRITEUP.md) · [Slides](docs/slides/inference-lessons-2026-09-13.html) · [Article](MEDIUM_URL_TBD) · [TabFM](https://github.com/google-research/tabfm)**
+**[Results](#results) · [Write-up](docs/WRITEUP.md) · [Slides](docs/slides) · [glukicov/ltm](https://github.com/glukicov/ltm) · [glukicov/ltm_ft](https://github.com/glukicov/ltm_ft) · [TabFM](https://github.com/google-research/tabfm)**
 
 </div>
