@@ -18,7 +18,7 @@ latencies are only good for spotting trends, not for SLOs (see [Measurement cave
 | Biggest win | An **exact context (KV) cache**: encode the training rows once per context, then each request pays only for its own rows. On the L4 a 16-row request with 8,192 context rows went **9.47 s → 129 ms (74×)**. Latency no longer depends on context size (log-log slope 1.12 → 0.06). |
 | Second win | **`torch.compile` + CUDA graphs** on the cached forward: **111 ms → 28 ms** p50 for a 1-row request (p99 134 → 33 ms). The eager floor was kernel-launch overhead, not GPU compute. |
 | Third win | **Batch everything that's independent**: ensemble members in one forward (5× vs the library default of one at a time), and concurrent requests in one batch (exact, because query rows never attend to each other). |
-| Serving on 1× L4 (eager baseline) | FastAPI's continuous batcher saturates at **~285 req/s** (p99 673 ms at 160 req/s). Triton with 1 instance holds **~400 req/s** (p99 380 ms at 160, 447 ms at 320 req/s) on about one CPU core, because its batcher merges up to ~70 requests per forward under load. A second instance on the same GPU added nothing (~300 req/s, worse tail). An earlier run in which 1-instance Triton "collapsed" at 240 req/s turned out to be the load generator's limit, not the server's (§4). |
+| Serving on 1× L4 (eager baseline) | FastAPI's continuous batcher saturates at **~285 req/s** (p99 673 ms at 160 req/s). Triton with 1 instance holds **~400 req/s** (p99 380 ms at 160, 447 ms at 320 req/s) on about one CPU core, because its batcher merges up to ~70 requests per forward under load. A second instance on the same GPU added nothing (slightly slower up to 240 req/s; its ~300 req/s knee was measured with a 4-process client only). An earlier run in which 1-instance Triton "collapsed" at 240 req/s turned out to be the load generator's limit, not the server's (§4). |
 | Kubernetes | KServe (Standard mode) on GKE, weights pulled from GCS, KEDA autoscaling on in-flight requests. **Cold start from zero: 7 min 12 s**, half of it the 13.6 GB image pull. A warm restart takes ~1 min. KEDA asked for a second replica in 28 s; GPU quota (not the autoscaler) blocked it. |
 | Validation | The cache matches stock TabFM to ≤3e-6 in fp32 on CPU, MPS and CUDA, with 100% of labels identical. In bf16, cached and compiled outputs are within stock TabFM's own batch-composition noise (100% label agreement). The HTTP service is tested end to end against stock TabFM with the real model; both stacks run and agree under Docker, kind + KServe and GKE + KServe. |
 | **Optimising the deployed system** | Redeployed both stacks with compilation. **Compiled Triton, 1 instance: p50 91 ms / p99 125 ms at 160 req/s, knee ~350 req/s** (eager: 273 / 380 ms, knee ~400 req/s: compilation cut latency 3× at a similar capacity). Compiled FastAPI: 97 / 137 ms at 160 req/s, but its knee *dropped* to ~230 req/s because one Python process (1.05 cores) became the ceiling. A second Triton instance made things *worse* when compiled (the two instances only time-slice the GPU) and did not help when eager either. The price was a 20–23 min compile warm-up per cold replica (206 s with the compile cache reused). |
@@ -345,7 +345,7 @@ open-loop client running in-cluster. These are **eager** runs; compiled results 
 |---|---|---|---|---|
 | FastAPI, continuous batcher | 270 / 381 ms | 314 / 673 ms | 406 / 850 ms | ~285 req/s |
 | Triton, 1 instance | 258 / 362 ms | 273 / 380 ms | **290 / 405 ms** | ~400 req/s (322 / 447 ms at 320; 83 of 12,162 dropped at 400) |
-| Triton, 2 instances (same GPU) | 237 / 372 ms | 266 / 410 ms | 317 / 443 ms | ~300 req/s (366 / 1,754 ms at 320) |
+| Triton, 2 instances (same GPU) | 237 / 372 ms | 266 / 410 ms | 317 / 443 ms | ~300 req/s† (366 / 1,754 ms at 320) |
 
 Reading the table:
 
@@ -358,6 +358,9 @@ Reading the table:
   3-process client that saturated at ~240 req/s itself (§4); the "collapse" was client backlog. Re-measured with
   4–6 client processes, the same deployment held 320 req/s at p99 447 ms. The old numbers are kept in
   `results/load/raw/gke_triton_i1.jsonl`; the corrected ones in `raw/gke_triton_i1_remeasured_*.jsonl`.
+- † **The 2-instance knee is not proven to be the server's.** That run used a 4-process client throughout and was
+  not repeated with 6, while the 1-instance run needed 6 processes above 240 req/s. Up to 240 req/s both clients
+  kept up, and there the second instance was slower at every rate; above that, treat ~300 req/s as a lower bound.
 - **A second instance on the same GPU did not add capacity** (18.8 of 23 GB used, so no room for a third anyway).
   It was slightly slower at every load and its tail blew up at 320 req/s, because two instances split the queue into
   smaller batches and interleave on one GPU. The "second instance doubled capacity" conclusion of the first run was
@@ -379,7 +382,7 @@ graphs, query rows padded to power-of-two buckets, every bucket up to `max_batch
 | Triton on 1× L4 | 80 req/s p50 / p99 | 160 req/s | 240 req/s | 320 req/s | Knee |
 |---|---|---|---|---|---|
 | eager, 1 instance | 258 / 362 ms | 273 / 380 ms | 290 / 405 ms | 322 / 447 ms | ~400 req/s |
-| eager, 2 instances | 237 / 372 ms | 266 / 410 ms | 317 / 443 ms | 366 / 1,754 ms | ~300 req/s |
+| eager, 2 instances | 237 / 372 ms | 266 / 410 ms | 317 / 443 ms | 366 / 1,754 ms | ~300 req/s† |
 | **compiled, 1 instance** | **85 / 117 ms** | **91 / 125 ms** | **99 / 137 ms** | **112 / 315 ms** | **~350 req/s** |
 | compiled, 2 instances | 118 / 198 ms | 154 / 218 ms | 169 / 266 ms | 186 / 257 ms | ~320 req/s |
 

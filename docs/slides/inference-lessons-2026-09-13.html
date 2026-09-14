@@ -1,0 +1,1283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<!-- Build provenance: write it with `scripts/cite.py --stamp <deck> --repo .` so check.py
+     can report which slides have gone stale. See references/freshness.md. -->
+<meta name="slideops-build" content="commit=6110572 date=2026-09-14 repo=ltm_serve">
+<title>Serving a 1.64B model online: a self-study guide</title>
+<style>
+  /* ── THEME ─────────────────────────────────────────────────────────────────
+     The :root block below is the ENTIRE theme: every color in the deck derives
+     from these tokens (soft tints/borders via color-mix), so switching theme
+     means replacing this one block. Preset palettes (Ledger Light default,
+     Ledger Dark, midnight, graphite) live in references/themes.md; brand
+     extraction rules live in references/style-guide.md § Theming.
+     Do not invent colors and do not reintroduce hex/rgba literals below
+     this block. */
+  :root{
+    /* surfaces */
+    --bg:#faf6ee; --bg2:#f2ecdf; --card:#ffffff; --code-bg:#2b2820;
+    --stage-1:#e8e0cf; --stage-2:#cfc6b2;           /* backdrop behind the deck */
+    --section-1:#f4eede; --section-2:#e6dcc6;       /* section-divider gradient */
+    /* text */
+    --fg:#2b2620;        /* headings */
+    --text:#3d372e;      /* body copy */
+    --strong:#171310;    /* bold/emphasis; the darkest ink */
+    --muted:#8a8069;
+    /* roles */
+    --accent:#7a7f1f; --accent2:#5f6419; --warn:#a34a3f; --bad:#b5544a;
+    /* code block: dark blocks sit on the light surfaces for contrast */
+    --code-fg:#e8dfc0; --code-comment:#948b74; --code-keyword:#d3c87a; --code-string:#c9b98a;
+    /* title gradient */
+    --grad-1:#2b2620; --grad-2:#7a7f1f;
+    /* misc */
+    --card-border:color-mix(in srgb, var(--muted) 30%, transparent);
+    --img-bg:#ffffff;                                /* backing behind embedded images */
+    --shadow:rgba(60,50,30,.25);
+    --radius:14px;
+    --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --mono: "SFMono-Regular", Consolas, Menlo, "Liberation Mono", monospace;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;background:var(--stage-2);color:var(--fg);font-family:var(--font);height:100%;overflow:hidden;}
+  .stage{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:radial-gradient(ellipse at 50% 0%, var(--stage-1) 0%, var(--stage-2) 70%);}
+  .deck{position:relative;width:1280px;height:720px;transform-origin:center center;box-shadow:0 30px 90px var(--shadow);border-radius:6px;overflow:hidden;background:linear-gradient(160deg,var(--bg) 0%, var(--bg2) 100%);}
+  .slide{position:absolute;inset:0;padding:64px 76px 56px;display:flex;flex-direction:column;opacity:0;visibility:hidden;transition:opacity .25s ease;}
+  .slide.active{opacity:1;visibility:visible;}
+  .kicker{font-size:14px;letter-spacing:.12em;color:var(--accent);font-weight:700;margin:0 0 10px;display:flex;align-items:center;gap:10px;}
+  h1{font-size:44px;line-height:1.15;margin:0 0 14px;font-weight:800;letter-spacing:-.01em;}
+  h2{font-size:34px;line-height:1.2;margin:0 0 18px;font-weight:800;letter-spacing:-.01em;}
+  h3{font-size:20px;margin:0 0 8px;font-weight:700;color:var(--fg);}
+  .subtitle{font-size:19px;color:var(--muted);margin:0 0 6px;line-height:1.5;}
+  .body{flex:1;min-height:0;display:flex;flex-direction:column;gap:16px;}
+  p{margin:0 0 10px;line-height:1.55;font-size:17px;color:var(--text);}
+  ul,ol{margin:0 0 8px;padding-left:22px;}
+  li{margin-bottom:8px;line-height:1.5;font-size:17px;color:var(--text);}
+  li b, p b, td b{color:var(--strong);}
+  .muted{color:var(--muted);}
+  .small{font-size:14px;}
+  /* Status tags: use sparingly and accurately. Don't call something "major"
+     or "critical" unless it genuinely is; a wrong badge is worse than none. */
+  .tag{display:inline-block;font-size:12px;font-weight:800;letter-spacing:.06em;padding:4px 10px;border-radius:999px;border:1px solid transparent;}
+  .tag-new{background:color-mix(in srgb, var(--accent) 13%, transparent);color:var(--accent);border-color:color-mix(in srgb, var(--accent) 40%, transparent);}
+  .tag-major{background:color-mix(in srgb, var(--warn) 14%, transparent);color:var(--warn);border-color:color-mix(in srgb, var(--warn) 45%, transparent);}
+  .tag-existing{background:color-mix(in srgb, var(--accent2) 13%, transparent);color:var(--accent2);border-color:color-mix(in srgb, var(--accent2) 40%, transparent);}
+  .tag-optional{background:color-mix(in srgb, var(--muted) 14%, transparent);color:color-mix(in srgb, var(--muted) 55%, var(--fg));border-color:color-mix(in srgb, var(--muted) 40%, transparent);}
+  .tag-critical{background:color-mix(in srgb, var(--bad) 14%, transparent);color:var(--bad);border-color:color-mix(in srgb, var(--bad) 45%, transparent);}
+
+  .card{background:var(--card);border:1px solid var(--card-border);border-radius:var(--radius);padding:18px 20px;}
+  .card.tint-accent{background:color-mix(in srgb, var(--accent) 8%, transparent);border-color:color-mix(in srgb, var(--accent) 40%, transparent);}
+  .card.tint-warn{background:color-mix(in srgb, var(--warn) 8%, transparent);border-color:color-mix(in srgb, var(--warn) 35%, transparent);}
+  /* Grids default to content height so trailing content never gets pushed under
+     the nav pill. Add the "fill" class only when a grid should stretch to fill
+     the remaining slide height (e.g. tall code comparisons). */
+  .cols-2{display:grid;grid-template-columns:1fr 1fr;gap:20px;flex:0 0 auto;min-height:0;}
+  .cols-3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;flex:0 0 auto;min-height:0;}
+  .cols-2.fill,.cols-3.fill{flex:1;}
+  .col{display:flex;flex-direction:column;gap:12px;min-height:0;}
+  .stat{display:flex;flex-direction:column;gap:2px;}
+  .stat .num{font-size:38px;font-weight:800;color:var(--accent);line-height:1;}
+  .stat .lbl{font-size:13px;color:var(--muted);letter-spacing:.06em;}
+  .stat-row{display:flex;gap:22px;flex-wrap:wrap;}
+
+  pre.code{background:var(--code-bg);border:1px solid var(--card-border);border-radius:10px;padding:14px 16px;overflow:hidden;font-family:var(--mono);font-size:14.5px;line-height:1.55;color:var(--code-fg);}
+  pre.code.small{font-size:12.5px;line-height:1.5;}
+  pre.code .c{color:var(--code-comment);} /* comments */
+  pre.code .k{color:var(--code-keyword);} /* keywords */
+  pre.code .s{color:var(--code-string);} /* strings */
+  pre.code .n{color:var(--code-string);} /* names/literals */
+  code.inline{font-family:var(--mono);background:color-mix(in srgb, var(--muted) 15%, transparent);padding:1px 6px;border-radius:5px;font-size:.92em;color:color-mix(in srgb, var(--accent2) 55%, var(--fg));}
+
+  table{width:100%;border-collapse:collapse;font-size:14.5px;}
+  th{text-align:left;color:var(--accent2);font-size:12px;letter-spacing:.05em;padding:6px 10px;border-bottom:1px solid var(--card-border);}
+  td{padding:7px 10px;border-bottom:1px solid color-mix(in srgb, var(--muted) 10%, transparent);color:var(--text);vertical-align:top;}
+  tr:last-child td{border-bottom:none;}
+  td code.inline, th code.inline{white-space:nowrap;}
+
+  /* Simple box-and-arrow diagrams. Keep these plain: no SVG, no external
+     diagramming libs. A row of .flow-box separated by .flow-arrow; stack rows
+     for multi-step flows; .flow-vert-arrow for a row-to-row down arrow. */
+  .flow{display:flex;align-items:center;justify-content:center;gap:0;flex-wrap:nowrap;}
+  .flow-box{background:var(--card);border:1px solid var(--card-border);border-radius:12px;padding:14px 16px;text-align:center;flex:1;min-width:0;}
+  .flow-box .t{font-weight:700;font-size:15px;color:var(--strong);margin-bottom:4px;}
+  .flow-box .d{font-size:12.5px;color:var(--muted);line-height:1.35;}
+  .flow-box.accent{border-color:color-mix(in srgb, var(--accent) 50%, transparent);background:color-mix(in srgb, var(--accent) 8%, transparent);}
+  .flow-box.warn{border-color:color-mix(in srgb, var(--warn) 50%, transparent);background:color-mix(in srgb, var(--warn) 8%, transparent);}
+  .flow-arrow{flex:0 0 auto;color:var(--muted);font-size:22px;padding:0 10px;}
+  .flow-vert-arrow{color:var(--muted);font-size:20px;padding:4px 0;}
+
+  /* Lane diagram: for "where X applies vs. doesn't" / critical-path-vs-optional
+     comparisons: one labeled row per case. */
+  .lane{display:flex;align-items:center;gap:14px;margin-bottom:14px;}
+  .lane-label{width:150px;flex:0 0 150px;font-size:12px;letter-spacing:.05em;font-weight:800;text-align:right;padding-right:6px;}
+  .lane-label.critical{color:var(--bad);}
+  .lane-label.parallel{color:var(--accent2);}
+  .lane-label.optional{color:var(--muted);}
+  .lane-track{flex:1;display:flex;align-items:center;gap:0;background:color-mix(in srgb, var(--strong) 2%, transparent);border-radius:12px;padding:10px 14px;border:1px dashed color-mix(in srgb, var(--muted) 22%, transparent);}
+
+  .section-slide{align-items:center;justify-content:center;text-align:center;background:radial-gradient(ellipse at 50% 40%, var(--section-1) 0%, var(--section-2) 75%);}
+  .section-slide .num{font-size:15px;color:var(--accent);font-weight:800;letter-spacing:.2em;margin-bottom:18px;}
+  .section-slide h1{font-size:52px;}
+  .section-slide .subtitle{font-size:20px;max-width:760px;}
+
+  .title-slide{align-items:center;justify-content:center;text-align:center;}
+  .title-slide h1{font-size:58px;}
+  .title-slide h1 .grad{background:linear-gradient(90deg,var(--grad-1),var(--grad-2));-webkit-background-clip:text;background-clip:text;color:transparent;}
+  .title-slide .logo-row{display:flex;gap:12px;margin-bottom:26px;}
+
+  .img-wrap{flex:1;display:flex;align-items:center;justify-content:center;min-height:0;}
+  .img-wrap img{max-width:100%;max-height:100%;object-fit:contain;border-radius:10px;border:1px solid var(--card-border);background:var(--img-bg);}
+  .img-wrap svg{max-width:100%;max-height:100%;height:auto;}
+  .img-placeholder{flex:1;align-self:stretch;display:flex;align-items:center;justify-content:center;text-align:center;padding:24px;border:2px dashed var(--card-border);border-radius:10px;color:var(--muted);font-size:15px;}
+  .caption{text-align:center;color:var(--muted);font-size:15px;margin-top:10px;}
+
+  .list-check li{list-style:none;position:relative;padding-left:26px;}
+  .list-check li:before{content:"✓";position:absolute;left:0;color:var(--accent);font-weight:800;}
+  .list-todo li{list-style:none;position:relative;padding-left:26px;}
+  .list-todo li:before{content:"→";position:absolute;left:0;color:var(--accent2);font-weight:800;}
+  .list-x li{list-style:none;position:relative;padding-left:26px;}
+  .list-x li:before{content:"✕";position:absolute;left:0;color:var(--bad);font-weight:800;}
+
+  /* Speaker notes: add <aside class="notes">…</aside> anywhere in a slide;
+     invisible until the presenter presses N (and always excluded from
+     screenshots/PDF unless toggled). */
+  .notes{display:none;}
+  .deck.show-notes .slide.active .notes{display:block;position:absolute;left:24px;right:24px;bottom:76px;background:color-mix(in srgb, var(--code-bg) 92%, transparent);border:1px solid var(--card-border);border-radius:10px;padding:12px 16px;font-size:14px;line-height:1.5;color:var(--muted);z-index:5;}
+  /* Overview grid: Esc toggles, #overview deep-links. Uses zoom so the
+     layout box scales with the render (supported in all evergreen browsers). */
+  .deck.overview{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;padding:16px;overflow-y:auto;align-content:start;}
+  .deck.overview .slide{position:relative;inset:auto;zoom:0.2266;opacity:1;visibility:visible;transition:none;cursor:pointer;border:2px solid var(--card-border);border-radius:18px;}
+
+  /* HUD / navigation: do not remove; every slide relies on the JS below */
+  .progress{position:fixed;top:0;left:0;height:4px;background:var(--accent);z-index:50;transition:width .2s ease;box-shadow:0 0 12px color-mix(in srgb, var(--accent) 60%, transparent);}
+  .hud{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:16px;background:color-mix(in srgb, var(--bg) 85%, transparent);backdrop-filter:blur(6px);border:1px solid var(--card-border);padding:8px 14px;border-radius:999px;z-index:60;}
+  .nav-btn{background:color-mix(in srgb, var(--strong) 6%, transparent);border:1px solid var(--card-border);color:var(--fg);width:34px;height:34px;border-radius:50%;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background .15s;}
+  .nav-btn:hover{background:color-mix(in srgb, var(--accent) 25%, transparent);}
+  .counter{font-size:13px;color:var(--muted);font-variant-numeric:tabular-nums;min-width:56px;text-align:center;}
+  .hint{position:fixed;top:16px;right:20px;font-size:12px;color:var(--muted);z-index:60;opacity:.7;}
+</style>
+</head>
+<body>
+
+<div class="progress" id="progressBar"></div>
+<div class="hint">← → or click · Esc overview · N notes</div>
+
+<div class="stage">
+  <div class="deck" id="deck">
+    <!-- SLIDES START -->
+    <!-- 0: TITLE -->
+    <section class="slide title-slide">
+      <div class="logo-row">
+        <span class="tag tag-new">ltm_serve</span>
+        <span class="tag tag-existing">TabFM · 1.64B parameters · NVIDIA L4 on GKE</span>
+        <span class="tag tag-optional">Part 3 of a series</span>
+      </div>
+      <h1>Serving a 1.64B model online<br><span class="grad">a self-study guide, measured</span></h1>
+      <p class="subtitle">From a <code class="inline">predict_proba</code> call in a notebook to Triton and KServe on a GPU.
+      Every inference concept is introduced from first principles, then shown with a real measurement from this project.
+      For ML engineers who have trained models but never served one.</p>
+      <p class="small muted" style="margin-top:26px;">Gleb Lukicov · github.com/glukicov/ltm_serve · slides produced with SlideOps</p>
+      <aside class="notes">Part 3 of a series: glukicov/ltm (TabFM matched CatBoost with no training), glukicov/ltm_ft (fine-tuning TabFM on a laptop and an L4), and this repo (serving it online).</aside>
+    </section>
+
+    <!-- 1: HOW TO STUDY -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Start here</div>
+      <h2>How to study this deck</h2>
+      <div class="body" style="gap:12px;">
+<div class="cols-3" style="gap:10px;"><div class="card" style="padding:10px 14px;"><h3 style="font-size:16px;margin:0 0 4px;">1. The model</h3><p class="small muted" style="margin:0;">What TabFM is; why its masks make a cache exact.</p></div><div class="card" style="padding:10px 14px;"><h3 style="font-size:16px;margin:0 0 4px;">2. Measure first</h3><p class="small muted" style="margin:0;">Latency, percentiles, GPU timing, precision, noise floors.</p></div><div class="card" style="padding:10px 14px;"><h3 style="font-size:16px;margin:0 0 4px;">3. Model-level optimisation</h3><p class="small muted" style="margin:0;">Context cache, batching members, overhead, compilation.</p></div><div class="card" style="padding:10px 14px;"><h3 style="font-size:16px;margin:0 0 4px;">4. Serving and load testing</h3><p class="small muted" style="margin:0;">Queueing, batching, open-loop load tests, Triton.</p></div><div class="card" style="padding:10px 14px;"><h3 style="font-size:16px;margin:0 0 4px;">5. Kubernetes and GPUs</h3><p class="small muted" style="margin:0;">KServe, KEDA, cold starts, bottlenecks that move.</p></div><div class="card" style="padding:10px 14px;"><h3 style="font-size:16px;margin:0 0 4px;">6. Lessons and reference</h3><p class="small muted" style="margin:0;">Principles, capacity model, glossary, further reading.</p></div></div>
+<div class="cols-2" style="gap:14px;"><div class="card" style="padding:12px 16px;"><h3 style="font-size:16px;">How the slides work</h3><ul class="small" style="margin:0;padding-left:18px;"><li style="margin-bottom:4px;font-size:14px;"><b>Primer</b> slides (kicker starts with “Primer”) explain a concept before the project uses it.</li><li style="margin-bottom:4px;font-size:14px;">Tinted <b>Key idea</b> boxes hold the one sentence to remember; red-tinted <b>In production</b> boxes say what it changes in a real system.</li><li style="margin-bottom:4px;font-size:14px;">Each section ends with <b>Check your understanding</b>: answer before reading the grey answers, then <b>Try it</b> in the repo.</li><li style="margin-bottom:0;font-size:14px;">Unfamiliar term? The glossary is near the end.</li></ul></div><div class="card" style="padding:12px 16px;"><h3 style="font-size:16px;">Where this fits</h3><p class="small" style="margin:0 0 6px;">Part 3 of a series on TabFM, Google's tabular foundation model:</p><ol class="small" style="margin:0 0 6px;padding-left:18px;"><li style="margin-bottom:2px;font-size:14px;"><b>glukicov/ltm</b>: TabFM vs CatBoost vs an LLM, with no training</li><li style="margin-bottom:2px;font-size:14px;"><b>glukicov/ltm_ft</b>: fine-tuning it on a laptop and an L4</li><li style="margin-bottom:0;font-size:14px;"><b>glukicov/ltm_serve</b>: serving it online (this deck)</li></ol><p class="small muted" style="margin:0;font-size:13px;">Assumes transformers and PyTorch. Assumes no serving, GPU or Kubernetes experience.</p></div></div>
+<p class="small muted" style="margin:0;font-size:13px;">Every number was measured in the repo. The L4 is the reference for serving numbers; the M4 laptop was under swap pressure, so its latencies show trends, not SLOs.</p>
+      </div>
+    </section>
+
+    <!-- 2: RESULTS AT A GLANCE -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">The project in one picture</div>
+      <h2>Four numbers that summarise the journey</h2>
+      <div class="body" style="gap:22px;">
+        <div class="cols-2">
+          <div class="card"><div class="stat"><span class="num">74×</span><span class="lbl">Exact context (KV) cache: 16-row request, 8,192 context rows, L4: 9.47 s → 129 ms</span></div></div>
+          <div class="card"><div class="stat"><span class="num">28 ms</span><span class="lbl">p50 cached forward with torch.compile + CUDA graphs, 1-row request (eager: 111 ms)</span></div></div>
+          <div class="card"><div class="stat"><span class="num">3×</span><span class="lbl">Lower serving latency after compiling Triton on one L4: p99 125 ms vs 380 ms at 160 req/s, similar ~350–400 req/s knee</span></div></div>
+          <div class="card"><div class="stat"><span class="num">7 min 12 s</span><span class="lbl">GPU cold start from zero nodes on GKE; half of it the 13.6 GB image pull</span></div></div>
+        </div>
+        <div class="card"><p class="small" style="margin:0;"><b>Validated, not assumed:</b> the cache matches stock TabFM to ≤3e-6 in fp32 on CPU, MPS and CUDA with 100% of labels identical,
+        and both serving stacks run and agree under Docker, kind + KServe and GKE + KServe.</p></div>
+      </div>
+    </section>
+
+    <!-- 3: SECTION THE MODEL -->
+    <section class="slide section-slide">
+      <div class="num">Section 1 of 6</div>
+      <h1>The model</h1>
+      <p class="subtitle">What TabFM is, and the one property of its attention masks that makes serving it fast and exact.</p>
+    </section>
+
+    <!-- 4: PRIMER TRAINING VS SERVING -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Primer · from training to serving</div>
+      <h2>Serving optimises different numbers than training</h2>
+      <div class="body">
+<table style="font-size:15px;"><tr><th></th><th>Training or a notebook</th><th>Online serving</th></tr><tr><td><b>Unit of work</b></td><td>epochs over a dataset</td><td>one request, often a single row</td></tr><tr><td><b>What you measure</b></td><td>loss, accuracy, time per epoch</td><td>latency percentiles, requests per second, cost per request</td></tr><tr><td><b>Who waits</b></td><td>you, once</td><td>every user, on every call</td></tr><tr><td><b>Batch size</b></td><td>chosen for convergence and memory</td><td>whatever traffic arrives, merged by the server</td></tr><tr><td><b>Start-up</b></td><td>load once, run for hours</td><td>every new replica pays a cold start</td></tr><tr><td><b>Failure looks like</b></td><td>a slow experiment</td><td>a missed latency target, dropped requests</td></tr></table>
+<div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>SLO</b> (service level objective): a target the service promises, such as <b>p99 latency &lt; 150 ms</b>. The capacity model at the end of this deck is built around exactly that target.</p></div>
+<div class="card tint-accent" style="padding:10px 16px;"><p class="small" style="margin:0;"><b>Key idea:</b> the trained model fixes what the predictions are; serving is about delivering those same predictions within a latency budget, at a cost. Every optimisation in this deck is checked against unchanged predictions.</p></div>
+      </div>
+    </section>
+
+    <!-- 5: WHAT TABFM IS -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">The model</div>
+      <h2>An in-context model re-reads its training table on every call</h2>
+      <div class="body">
+        <div class="card">
+          <p style="font-size:19px;margin:0;"><code class="inline">fit()</code> trains nothing: it fits encoders and stages the training table.
+          <code class="inline">predict_proba()</code> feeds <b>training rows + query rows</b> through a transformer, and query rows read labels off
+          the training rows, the way an LLM uses few-shot examples.</p>
+        </div>
+        <div class="cols-3">
+          <div class="card"><h3>It is large</h3><p class="small" style="margin:0;">1.64B parameters: 6.6 GB in fp32, 3.3 GB in bf16. Almost all of it is a 24-layer in-context encoder at width 2048.</p></div>
+          <div class="card"><h3>Four stages × 32 members</h3><p class="small" style="margin:0;">Cell embedder, column set-transformer (256 inducing points), row transformer, in-context encoder. Stock runs 32 ensemble members, <b>one per forward pass</b>.</p></div>
+          <div class="card"><h3>Context paid per request</h3><p class="small" style="margin:0;">Stock <code class="inline">predict_proba</code> sends <code class="inline">n_train + n_query</code> rows through all 24 layers for every request.</p></div>
+        </div>
+        <div class="card tint-accent" style="padding:10px 16px;"><p class="small" style="margin:0;"><b>Key idea:</b> read the model code before designing the server. Everything that follows came from reading <code class="inline">tabfm/src/pytorch/model.py</code>.</p></div>
+      </div>
+    </section>
+
+    <!-- 6: PRIMER KV CACHE -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Primer · KV cache</div>
+      <h2>A KV cache stores attention inputs that later work can't change</h2>
+      <div class="body" style="gap:8px;">
+<p class="small" style="margin:0;"><b>In an LLM</b></p><div class="flow"><div class="flow-box"><div class="t">Prompt and past tokens</div><div class="d">already processed</div></div><div class="flow-arrow">→</div><div class="flow-box"><div class="t">Causal mask</div><div class="d">token t attends only to tokens ≤ t</div></div><div class="flow-arrow">→</div><div class="flow-box"><div class="t">Past K and V never change</div><div class="d">new tokens can't alter them</div></div><div class="flow-arrow">→</div><div class="flow-box accent"><div class="t">KV cache</div><div class="d">each new token computes only itself</div></div></div><p class="small" style="margin:6px 0 0;"><b>In TabFM</b></p><div class="flow"><div class="flow-box"><div class="t">Training rows</div><div class="d">the context, with labels</div></div><div class="flow-arrow">→</div><div class="flow-box"><div class="t">Row masks</div><div class="d">every row attends only to training rows</div></div><div class="flow-arrow">→</div><div class="flow-box"><div class="t">Training rows' K and V</div><div class="d">never depend on the query rows</div></div><div class="flow-arrow">→</div><div class="flow-box accent"><div class="t">Context cache</div><div class="d">each request computes only its own rows</div></div></div>
+<table style="font-size:13.5px;"><tr><th></th><th>LLM KV cache</th><th>TabFM context cache (this project)</th></tr><tr><td><b>Cached</b></td><td>K, V of past tokens, per layer</td><td>K, V of training rows per layer, plus column inducing-point states, per ensemble member</td></tr><tr><td><b>Built</b></td><td>incrementally, per request</td><td>once per table, shared by every request</td></tr><tr><td><b>Exact because</b></td><td>the causal mask</td><td>keys masked to training rows (fp32: ≤3e-6 vs stock)</td></tr></table>
+<div class="card tint-accent" style="padding:10px 16px;"><p class="small" style="margin:0;"><b>Key idea:</b> look for computation whose inputs don't depend on the request. When a mask guarantees it, caching is exact, not an approximation.</p></div>
+      </div>
+    </section>
+
+    <!-- 7: ATTENTION PROPERTY -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">The model</div>
+      <h2>One masking property makes serving tractable, and exact</h2>
+      <div class="img-wrap" style="padding:0 20px;"><svg id="mmd-attention" width="100%" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" class="flowchart" style="max-width: 1053.3px; background-color: transparent;" viewBox="0 -0.000003814697265625 1053.296875 293.37969970703125" role="graphics-document document" aria-roledescription="flowchart-v2"><style>#mmd-attention{font-family:Arial,Helvetica,sans-serif;font-size:16px;fill:#2b2620;}@keyframes edge-animation-frame{from{stroke-dashoffset:0;}}@keyframes dash{to{stroke-dashoffset:0;}}#mmd-attention .edge-animation-slow{stroke-dasharray:9,5!important;stroke-dashoffset:900;animation:dash 50s linear infinite;stroke-linecap:round;}#mmd-attention .edge-animation-fast{stroke-dasharray:9,5!important;stroke-dashoffset:900;animation:dash 20s linear infinite;stroke-linecap:round;}#mmd-attention .error-icon{fill:#faf6ee;}#mmd-attention .error-text{fill:#050911;stroke:#050911;}#mmd-attention .edge-thickness-normal{stroke-width:1px;}#mmd-attention .edge-thickness-thick{stroke-width:3.5px;}#mmd-attention .edge-pattern-solid{stroke-dasharray:0;}#mmd-attention .edge-thickness-invisible{stroke-width:0;fill:none;}#mmd-attention .edge-pattern-dashed{stroke-dasharray:3;}#mmd-attention .edge-pattern-dotted{stroke-dasharray:2;}#mmd-attention .marker{fill:#8a8069;stroke:#8a8069;}#mmd-attention .marker.cross{stroke:#8a8069;}#mmd-attention svg{font-family:Arial,Helvetica,sans-serif;font-size:16px;}#mmd-attention p{margin:0;}#mmd-attention .label{font-family:Arial,Helvetica,sans-serif;color:#2b2620;}#mmd-attention .cluster-label text{fill:#050911;}#mmd-attention .cluster-label span{color:#050911;}#mmd-attention .cluster-label span p{background-color:transparent;}#mmd-attention .label text,#mmd-attention span{fill:#2b2620;color:#2b2620;}#mmd-attention .node rect,#mmd-attention .node circle,#mmd-attention .node ellipse,#mmd-attention .node polygon,#mmd-attention .node path{fill:#ffffff;stroke:#7a7f1f;stroke-width:1px;}#mmd-attention .rough-node .label text,#mmd-attention .node .label text,#mmd-attention .image-shape .label,#mmd-attention .icon-shape .label{text-anchor:middle;}#mmd-attention .node .katex path{fill:#000;stroke:#000;stroke-width:1px;}#mmd-attention .rough-node .label,#mmd-attention .node .label,#mmd-attention .image-shape .label,#mmd-attention .icon-shape .label{text-align:center;}#mmd-attention .node.clickable{cursor:pointer;}#mmd-attention .root .anchor path{fill:#8a8069!important;stroke-width:0;stroke:#8a8069;}#mmd-attention .arrowheadPath{fill:rgba(255, 255, 255, 0);}#mmd-attention .edgePaths .path{stroke:#8a8069;stroke-width:1px;}#mmd-attention .flowchart-link{stroke:#8a8069;fill:none;}#mmd-attention .edgeLabel{background-color:#f2ecdf;text-align:center;}#mmd-attention .edgeLabel p{background-color:#f2ecdf;}#mmd-attention .edgeLabel rect{opacity:0.5;background-color:#f2ecdf;fill:#f2ecdf;}#mmd-attention .labelBkg{background-color:rgba(242, 236, 223, 0.5);}#mmd-attention .cluster rect{fill:#faf6ee;stroke:hsl(40, 14.5454545455%, 85.6862745098%);stroke-width:1px;}#mmd-attention .cluster text{fill:#050911;}#mmd-attention .cluster span{color:#050911;}#mmd-attention .node .collapsed-indicator{fill:hsl(40, 14.5454545455%, 85.6862745098%);stroke:none;opacity:0.6;}#mmd-attention .node .collapsed-separator{stroke:hsl(40, 14.5454545455%, 85.6862745098%);stroke-width:0.75px;}#mmd-attention div.mermaidTooltip{position:absolute;text-align:center;max-width:200px;padding:2px;font-family:Arial,Helvetica,sans-serif;font-size:12px;background:#faf6ee;border:1px solid hsl(40, 14.5454545455%, 85.6862745098%);border-radius:2px;pointer-events:none;z-index:100;}#mmd-attention .flowchartTitleText{text-anchor:middle;font-size:18px;fill:#2b2620;}#mmd-attention rect.text{fill:none;stroke-width:0;}#mmd-attention .icon-shape,#mmd-attention .image-shape{background-color:#f2ecdf;text-align:center;}#mmd-attention .icon-shape p,#mmd-attention .image-shape p{background-color:#f2ecdf;padding:2px;}#mmd-attention .icon-shape .label rect,#mmd-attention .image-shape .label rect{opacity:0.5;background-color:#f2ecdf;fill:#f2ecdf;}#mmd-attention .label-icon{display:inline-block;height:1em;overflow:visible;vertical-align:-0.125em;}#mmd-attention .node .label-icon path{fill:currentColor;stroke:revert;stroke-width:revert;}#mmd-attention .node .neo-node{stroke:#7a7f1f;}#mmd-attention [data-look="neo"].node rect,#mmd-attention [data-look="neo"].cluster rect,#mmd-attention [data-look="neo"].node polygon{stroke:url(#mmd-attention-gradient);filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#mmd-attention [data-look="neo"].swimlane.cluster rect{filter:none;}#mmd-attention [data-look="neo"].node path{stroke:url(#mmd-attention-gradient);stroke-width:1px;}#mmd-attention [data-look="neo"].node .outer-path{filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#mmd-attention [data-look="neo"].node .neo-line path{stroke:#7a7f1f;filter:none;}#mmd-attention [data-look="neo"].node circle{stroke:url(#mmd-attention-gradient);filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#mmd-attention [data-look="neo"].node circle .state-start{fill:#000000;}#mmd-attention [data-look="neo"].icon-shape .icon{fill:url(#mmd-attention-gradient);filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#mmd-attention [data-look="neo"].icon-shape .icon-neo path{stroke:url(#mmd-attention-gradient);filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#mmd-attention :root{--mermaid-font-family:"trebuchet ms",verdana,arial,sans-serif;}</style><g><marker id="mmd-attention_flowchart-v2-pointEnd" class="marker flowchart-v2" viewBox="0 0 10 10" refX="5" refY="5" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"/></marker><marker id="mmd-attention_flowchart-v2-pointStart" class="marker flowchart-v2" viewBox="0 0 10 10" refX="4.5" refY="5" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" orient="auto"><path d="M 0 5 L 10 10 L 10 0 z" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"/></marker><marker id="mmd-attention_flowchart-v2-pointEnd-margin" class="marker flowchart-v2" viewBox="0 0 11.5 14" refX="11.5" refY="7" markerUnits="userSpaceOnUse" markerWidth="10.5" markerHeight="14" orient="auto"><path d="M 0 0 L 11.5 7 L 0 14 z" class="arrowMarkerPath" style="stroke-width: 0; stroke-dasharray: 1, 0;"/></marker><marker id="mmd-attention_flowchart-v2-pointStart-margin" class="marker flowchart-v2" viewBox="0 0 11.5 14" refX="1" refY="7" markerUnits="userSpaceOnUse" markerWidth="11.5" markerHeight="14" orient="auto"><polygon points="0,7 11.5,14 11.5,0" class="arrowMarkerPath" style="stroke-width: 0; stroke-dasharray: 1, 0;"/></marker><marker id="mmd-attention_flowchart-v2-circleEnd" class="marker flowchart-v2" viewBox="0 0 10 10" refX="11" refY="5" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"/></marker><marker id="mmd-attention_flowchart-v2-circleStart" class="marker flowchart-v2" viewBox="0 0 10 10" refX="-1" refY="5" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"/></marker><marker id="mmd-attention_flowchart-v2-circleEnd-margin" class="marker flowchart-v2" viewBox="0 0 10 10" refY="5" refX="12.25" markerUnits="userSpaceOnUse" markerWidth="14" markerHeight="14" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width: 0; stroke-dasharray: 1, 0;"/></marker><marker id="mmd-attention_flowchart-v2-circleStart-margin" class="marker flowchart-v2" viewBox="0 0 10 10" refX="-2" refY="5" markerUnits="userSpaceOnUse" markerWidth="14" markerHeight="14" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width: 0; stroke-dasharray: 1, 0;"/></marker><marker id="mmd-attention_flowchart-v2-crossEnd" class="marker cross flowchart-v2" viewBox="0 0 11 11" refX="12" refY="5.2" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><path d="M 1,1 l 9,9 M 10,1 l -9,9" class="arrowMarkerPath" style="stroke-width: 2; stroke-dasharray: 1, 0;"/></marker><marker id="mmd-attention_flowchart-v2-crossStart" class="marker cross flowchart-v2" viewBox="0 0 11 11" refX="-1" refY="5.2" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><path d="M 1,1 l 9,9 M 10,1 l -9,9" class="arrowMarkerPath" style="stroke-width: 2; stroke-dasharray: 1, 0;"/></marker><marker id="mmd-attention_flowchart-v2-crossEnd-margin" class="marker cross flowchart-v2" viewBox="0 0 15 15" refX="17.7" refY="7.5" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" orient="auto"><path d="M 1,1 L 14,14 M 1,14 L 14,1" class="arrowMarkerPath" style="stroke-width: 2.5;"/></marker><marker id="mmd-attention_flowchart-v2-crossStart-margin" class="marker cross flowchart-v2" viewBox="0 0 15 15" refX="-3.5" refY="7.5" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" orient="auto"><path d="M 1,1 L 14,14 M 1,14 L 14,1" class="arrowMarkerPath" style="stroke-width: 2.5; stroke-dasharray: 1, 0;"/></marker><g class="root"><g class="clusters"/><g class="edgePaths"><path d="M260.547,89.161L275.443,89.161C290.339,89.161,320.13,89.161,349.279,93.066C378.428,96.971,406.933,104.781,421.186,108.686L435.439,112.592" id="mmd-attention-L_T_A_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_T_A_0" data-points="W3sieCI6MjYwLjU0Njg3NSwieSI6ODkuMTYxMzMxMTc2NzU3ODF9LHsieCI6MzQ5LjkyMTg3NSwieSI6ODkuMTYxMzMxMTc2NzU3ODF9LHsieCI6NDM5LjI5Njg3NSwieSI6MTEzLjY0ODQ5MTc1MjU5MjU4fV0=" data-look="classic" marker-end="url(#mmd-attention_flowchart-v2-pointEnd)"/><path d="M246.586,212.929L263.809,212.929C281.031,212.929,315.477,212.929,346.952,209.023C378.428,205.118,406.933,197.308,421.186,193.403L435.439,189.498" id="mmd-attention-L_Q_A_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_Q_A_0" data-points="W3sieCI6MjQ2LjU4NTkzNzUsInkiOjIxMi45Mjg1MTYzODc5Mzk0NX0seyJ4IjozNDkuOTIxODc1LCJ5IjoyMTIuOTI4NTE2Mzg3OTM5NDV9LHsieCI6NDM5LjI5Njg3NSwieSI6MTg4LjQ0MTM1NTgxMjEwNDd9XQ==" data-look="classic" marker-end="url(#mmd-attention_flowchart-v2-pointEnd)"/><path d="M672.522,104.945L684.149,99.404C695.775,93.863,719.028,82.782,734.988,77.241C750.948,71.7,759.615,71.7,763.948,71.7L768.281,71.7" id="mmd-attention-L_A_C1_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_A_C1_0" data-points="W3sieCI6NjcyLjUyMjI3ODY2MDg1NzIsInkiOjEwNC45NDQ5MjUzMDgyMjc1NH0seyJ4Ijo3NDIuMjgxMjUsInkiOjcxLjcwMDAwMDc2MjkzOTQ1fSx7IngiOjc3Mi4yODEyNSwieSI6NzEuNzAwMDAwNzYyOTM5NDV9XQ==" data-look="classic" marker-end="url(#mmd-attention_flowchart-v2-pointEnd)"/><path d="M672.522,197.145L684.149,202.686C695.775,208.227,719.028,219.308,738.531,224.849C758.034,230.39,773.786,230.39,781.663,230.39L789.539,230.39" id="mmd-attention-L_A_C2_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_A_C2_0" data-points="W3sieCI6NjcyLjUyMjI3ODY2MDg1NzIsInkiOjE5Ny4xNDQ5MjIyNTY0Njk3M30seyJ4Ijo3NDIuMjgxMjUsInkiOjIzMC4zODk4NDY4MDE3NTc4fSx7IngiOjc5My41MzkwNjI1LCJ5IjoyMzAuMzg5ODQ2ODAxNzU3OH1d" data-look="classic" marker-end="url(#mmd-attention_flowchart-v2-pointEnd)"/></g><g class="edgeLabels"><g class="edgeLabel" transform="translate(349.921875, 89.16133117675781)"><g class="label" data-id="L_T_A_0" transform="translate(0, -10.68359375)"><g><rect class="background" style="" x="-59.375" y="0" width="118.75" height="21.3671875"/><text y="-10.1" text-anchor="middle" style=""><tspan class="text-outer-tspan row" x="0" y="-0.1em" dy="1.1em" text-anchor="middle"><tspan font-style="normal" class="text-inner-tspan" font-weight="normal">keys</tspan><tspan font-style="normal" class="text-inner-tspan" font-weight="normal"> and</tspan><tspan font-style="normal" class="text-inner-tspan" font-weight="normal"> values</tspan></tspan></text></g></g></g><g class="edgeLabel" transform="translate(349.921875, 212.92851638793945)"><g class="label" data-id="L_Q_A_0" transform="translate(0, -10.68359375)"><g><rect class="background" style="" x="-45.140625" y="0" width="90.28125" height="21.3671875"/><text y="-10.1" text-anchor="middle" style=""><tspan class="text-outer-tspan row" x="0" y="-0.1em" dy="1.1em" text-anchor="middle"><tspan font-style="normal" class="text-inner-tspan" font-weight="normal">queries</tspan><tspan font-style="normal" class="text-inner-tspan" font-weight="normal"> only</tspan></tspan></text></g></g></g><g class="edgeLabel"><g class="label" data-id="L_A_C1_0" transform="translate(0, 0)"><text y="-10.1" text-anchor="middle"><tspan class="text-outer-tspan row" x="0" y="-0.1em" dy="1.1em" text-anchor="middle"/></text></g></g><g><rect class="background" style="stroke: none"/></g><g class="edgeLabel"><g class="label" data-id="L_A_C2_0" transform="translate(0, 0)"><text y="-10.1" text-anchor="middle"><tspan class="text-outer-tspan row" x="0" y="-0.1em" dy="1.1em" text-anchor="middle"/></text></g></g><g><rect class="background" style="stroke: none"/></g></g><g class="nodes"><g class="node default" id="mmd-attention-flowchart-T-0" data-look="classic" transform="translate(134.2734375, 89.16133117675781)"><rect class="basic label-container" style="" x="-126.2734375" y="-37.48359298706055" width="252.546875" height="74.9671859741211"/><g class="label" style="" transform="translate(0, -17.483592987060547)"><rect/><g><rect class="background" style="stroke: none"/><text y="-10.1" style=""><tspan class="text-outer-tspan row" x="0" y="-0.1em" dy="1.1em"><tspan font-style="normal" class="text-inner-tspan" font-weight="normal">Training</tspan><tspan font-style="normal" class="text-inner-tspan" font-weight="normal"> rows</tspan></tspan><tspan class="text-outer-tspan row" x="0" y="1em" dy="1.1em"><tspan font-style="normal" class="text-inner-tspan" font-weight="normal">(the</tspan><tspan font-style="normal" class="text-inner-tspan" font-weight="normal"> context,</tspan><tspan font-style="normal" class="text-inner-tspan" font-weight="normal"> with</tspan><tspan font-style="normal" class="text-inner-tspan" font-weight="normal"> labels)</tspan></tspan></text></g></g></g><g class="node default" id="mmd-attention-flowchart-Q-1" data-look="classic" transform="translate(134.2734375, 212.92851638793945)"><rect class="basic label-container" style="" x="-112.3125" y="-46.283592224121094" width="224.625" height="92.56718444824219"/><g class="label" style="" transform="translate(0, -26.283592224121094)"><rect/><g><rect class="background" style="stroke: none"/><text y="-10.1" style=""><tspan class="text-outer-tspan row" x="0" y="-0.1em" dy="1.1em"><tspan font-style="normal" class="text-inner-tspan" font-weight="normal">Query</tspan><tspan font-style="normal" class="text-inner-tspan" font-weight="normal"> rows</tspan></tspan><tspan class="text-outer-tspan row" x="0" y="1em" dy="1.1em"><tspan font-style="normal" class="text-inner-tspan" font-weight="normal">(from</tspan><tspan font-style="normal" class="text-inner-tspan" font-weight="normal"> any</tspan><tspan font-style="normal" class="text-inner-tspan" font-weight="normal"> number</tspan><tspan font-style="normal" class="text-inner-tspan" font-weight="normal"> of</tspan></tspan><tspan class="text-outer-tspan row" x="0" y="2.1em" dy="1.1em"><tspan font-style="normal" class="text-inner-tspan" font-weight="normal">requests)</tspan></tspan></text></g></g></g><g class="node default" id="mmd-attention-flowchart-A-2" data-look="classic" transform="translate(575.7890625, 151.04492378234863)"><rect class="basic label-container" style="" x="-136.4921875" y="-46.099998474121094" width="272.984375" height="92.19999694824219"/><g class="label" style="" transform="translate(0, -26.099998474121094)"><rect/><g><rect class="background" style="stroke: none"/><text y="-10.1" style=""><tspan class="text-outer-tspan row" x="0" y="-0.1em" dy="1.1em"><tspan font-style="normal" class="text-inner-tspan" font-weight="normal">Every</tspan><tspan font-style="normal" class="text-inner-tspan" font-weight="normal"> row-mixing</tspan><tspan font-style="normal" class="text-inner-tspan" font-weight="normal"> attention:</tspan></tspan><tspan class="text-outer-tspan row" x="0" y="1em" dy="1.1em"><tspan font-style="normal" class="text-inner-tspan" font-weight="normal">keys</tspan><tspan font-style="normal" class="text-inner-tspan" font-weight="normal"> masked</tspan><tspan font-style="normal" class="text-inner-tspan" font-weight="normal"> to</tspan><tspan font-style="normal" class="text-inner-tspan" font-weight="normal"> training</tspan></tspan><tspan class="text-outer-tspan row" x="0" y="2.1em" dy="1.1em"><tspan font-style="normal" class="text-inner-tspan" font-weight="normal">rows</tspan></tspan></text></g></g></g><g class="node default" id="mmd-attention-flowchart-C1-8" data-look="classic" transform="translate(908.7890625, 71.70000076293945)"><rect class="basic label-container" style="" x="-136.5078125" y="-63.70000076293945" width="273.015625" height="127.4000015258789"/><g class="label" style="" transform="translate(0, -43.70000076293945)"><rect/><g><rect class="background" style="stroke: none"/><text y="-10.1" style=""><tspan class="text-outer-tspan row" x="0" y="-0.1em" dy="1.1em"><tspan font-style="normal" class="text-inner-tspan" font-weight="normal">(a)</tspan><tspan font-style="normal" class="text-inner-tspan" font-weight="normal"> Training</tspan><tspan font-style="normal" class="text-inner-tspan" font-weight="normal"> rows'</tspan><tspan font-style="normal" class="text-inner-tspan" font-weight="normal"> states</tspan></tspan><tspan class="text-outer-tspan row" x="0" y="1em" dy="1.1em"><tspan font-style="normal" class="text-inner-tspan" font-weight="normal">never</tspan></tspan><tspan class="text-outer-tspan row" x="0" y="2.1em" dy="1.1em"><tspan font-style="normal" class="text-inner-tspan" font-weight="normal">depend</tspan><tspan font-style="normal" class="text-inner-tspan" font-weight="normal"> on</tspan><tspan font-style="normal" class="text-inner-tspan" font-weight="normal"> the</tspan><tspan font-style="normal" class="text-inner-tspan" font-weight="normal"> queries</tspan></tspan><tspan class="text-outer-tspan row" x="0" y="3.2em" dy="1.1em"><tspan font-style="normal" class="text-inner-tspan" font-weight="normal">→</tspan><tspan font-style="normal" class="text-inner-tspan" font-weight="normal"> exact</tspan><tspan font-style="normal" class="text-inner-tspan" font-weight="normal"> KV</tspan><tspan font-style="normal" class="text-inner-tspan" font-weight="normal"> cache:</tspan><tspan font-style="normal" class="text-inner-tspan" font-weight="normal"> encode</tspan></tspan><tspan class="text-outer-tspan row" x="0" y="4.300000000000001em" dy="1.1em"><tspan font-style="normal" class="text-inner-tspan" font-weight="normal">once</tspan></tspan></text></g></g></g><g class="node default" id="mmd-attention-flowchart-C2-10" data-look="classic" transform="translate(908.7890625, 230.3898468017578)"><rect class="basic label-container" style="" x="-115.25" y="-54.989845275878906" width="230.5" height="109.97969055175781"/><g class="label" style="" transform="translate(0, -34.989845275878906)"><rect/><g><rect class="background" style="stroke: none"/><text y="-10.1" style=""><tspan class="text-outer-tspan row" x="0" y="-0.1em" dy="1.1em"><tspan font-style="normal" class="text-inner-tspan" font-weight="normal">(b)</tspan><tspan font-style="normal" class="text-inner-tspan" font-weight="normal"> Query</tspan><tspan font-style="normal" class="text-inner-tspan" font-weight="normal"> rows</tspan><tspan font-style="normal" class="text-inner-tspan" font-weight="normal"> never</tspan></tspan><tspan class="text-outer-tspan row" x="0" y="1em" dy="1.1em"><tspan font-style="normal" class="text-inner-tspan" font-weight="normal">influence</tspan><tspan font-style="normal" class="text-inner-tspan" font-weight="normal"> each</tspan><tspan font-style="normal" class="text-inner-tspan" font-weight="normal"> other</tspan></tspan><tspan class="text-outer-tspan row" x="0" y="2.1em" dy="1.1em"><tspan font-style="normal" class="text-inner-tspan" font-weight="normal">→</tspan><tspan font-style="normal" class="text-inner-tspan" font-weight="normal"> exact</tspan><tspan font-style="normal" class="text-inner-tspan" font-weight="normal"> batching</tspan><tspan font-style="normal" class="text-inner-tspan" font-weight="normal"> of</tspan></tspan><tspan class="text-outer-tspan row" x="0" y="3.2em" dy="1.1em"><tspan font-style="normal" class="text-inner-tspan" font-weight="normal">requests</tspan></tspan></text></g></g></g></g></g></g><defs><filter id="mmd-attention-drop-shadow" height="130%" width="130%"><feDropShadow dx="4" dy="4" stdDeviation="0" flood-opacity="0.06" flood-color="#000000"/></filter></defs><defs><filter id="mmd-attention-drop-shadow-small" height="150%" width="150%"><feDropShadow dx="2" dy="2" stdDeviation="0" flood-opacity="0.06" flood-color="#000000"/></filter></defs><linearGradient id="mmd-attention-gradient" gradientUnits="objectBoundingBox" x1="0%" y1="0%" x2="100%" y2="0%"><stop offset="0%" stop-color="#7a7f1f" stop-opacity="1"/><stop offset="100%" stop-color="hsl(41.0526315789, 2.2222222222%, 81.1764705882%)" stop-opacity="1"/></linearGradient></svg></div>
+      <p class="caption">The column set-transformer's inducing points and the in-context encoder attend to training rows only; every other operation is per row.</p>
+    </section>
+
+    <!-- 8: CHECK THE MODEL -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Check your understanding · the model</div>
+      <h2>Answer these before moving on</h2>
+      <div class="body">
+<div class="col" style="gap:12px;"><div class="card" style="padding:14px 18px;"><p style="margin:0 0 8px;font-size:16px;"><b>1. Why does stock TabFM get slower as the training table grows, even for a 1-row request?</b></p><p class="small muted" style="margin:0;">Every call runs training rows plus query rows through all 24 layers, so the cost scales with the context, not with the request.</p></div><div class="card" style="padding:14px 18px;"><p style="margin:0 0 8px;font-size:16px;"><b>2. Which property makes it safe to put requests from different users into one batch?</b></p><p class="small muted" style="margin:0;">Query rows never attend to each other (keys are masked to training rows), so a row's output can't depend on its batch-mates.</p></div><div class="card" style="padding:14px 18px;"><p style="margin:0 0 8px;font-size:16px;"><b>3. What do an LLM's KV cache and this context cache share, and how do they differ?</b></p><p class="small muted" style="margin:0;">Both store K and V that later computation reuses. An LLM cache grows per request as tokens are generated; the context cache is built once per table and shared by every request.</p></div></div>
+<div class="card" style="padding:10px 16px;"><p class="small" style="margin:0;"><b>Try it:</b> <code class="inline">uv run pytest -m slow</code> compares the cache with stock TabFM on real penguins data (downloads 6.6 GB of weights once). Read <code class="inline">tests/test_context_cache.py</code> to see what “exact” is checked against.</p></div>
+      </div>
+    </section>
+
+    <!-- 9: SECTION MEASURE BEFORE YOU OPTIMISE -->
+    <section class="slide section-slide">
+      <div class="num">Section 2 of 6</div>
+      <h1>Measure before you optimise</h1>
+      <p class="subtitle">Every rule the benchmark harness enforces caught a real mistake during the project.</p>
+    </section>
+
+    <!-- 10: PRIMER LATENCY AND THROUGHPUT -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Primer · latency and throughput</div>
+      <h2>Latency is how long one request takes; throughput is how many finish per second</h2>
+      <div class="body">
+<div class="cols-2"><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Latency:</b> time from sending a request to receiving its answer, as the client sees it. Measured for every request and reported as percentiles (next slide).</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Throughput:</b> completed requests (or rows) per second. A property of the whole system under a given load, not of one request.</p></div></div>
+<table style="font-size:15px;"><tr><th>Cached forward on the L4, reduce-overhead</th><th>p50 latency</th><th>Rows per second, run back to back</th></tr><tr><td>1-row request</td><td>28.3 ms</td><td>~35</td></tr><tr><td>16-row request</td><td>32.0 ms</td><td><b>~500</b></td></tr></table>
+<div class="cols-2"><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Worked example:</b> 16× the rows for +13% latency. While the GPU has spare capacity, doing more work per call buys throughput almost for free. That is why batching pays (section 4).</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Offered vs achieved load:</b> offered is the rate clients send; achieved is the rate that completes. When achieved falls below offered, the system is saturated and a queue is growing.</p></div></div>
+<div class="card tint-accent" style="padding:10px 16px;"><p class="small" style="margin:0;"><b>Key idea:</b> optimise for latency and throughput separately: a change can help one, both, or trade one for the other.</p></div>
+      </div>
+    </section>
+
+    <!-- 11: PRIMER PERCENTILES -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Primer · percentiles</div>
+      <h2>Report p50 and p99, never just the average</h2>
+      <div class="body">
+<div class="cols-3"><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>p50 (median):</b> half of the requests were faster than this. What a typical user sees.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>p99:</b> 1 request in 100 was slower. What your unluckiest regular users see, and what SLOs are written on.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>max:</b> the single worst request. Useful for spotting stalls, but too noisy to plan with.</p></div></div>
+<table style="font-size:15px;"><tr><th>1× L4, eager, 160 req/s offered</th><th>p50</th><th>p90</th><th>p95</th><th>p99</th><th>max</th></tr><tr><td>FastAPI</td><td>314 ms</td><td>414 ms</td><td>542 ms</td><td><b>673 ms</b></td><td>740 ms</td></tr><tr><td>Triton, 1 instance</td><td>273 ms</td><td>340 ms</td><td>353 ms</td><td><b>380 ms</b></td><td>611 ms</td></tr></table>
+<div class="cols-2"><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Same median, different tail:</b> the medians differ by 15%, the p99s by 77%. FastAPI parses JSON in the model's Python process, so some requests wait behind that work (section 5).</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Why tails dominate:</b> a page that makes 100 backend calls waits for the slowest one. If 1% of calls are slow, 1 − 0.99<sup>100</sup> ≈ 63% of pages hit at least one (Dean and Barroso, <i>The Tail at Scale</i>).</p></div></div>
+<div class="card tint-accent" style="padding:10px 16px;"><p class="small" style="margin:0;"><b>Key idea:</b> averages hide queueing and hiccups. Look at p99 next to p50, and at the gap between them.</p></div>
+      </div>
+    </section>
+
+    <!-- 12: PRIMER GPU ASYNCHRONY -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Primer · how PyTorch runs on a GPU</div>
+      <h2>PyTorch queues GPU work and returns immediately</h2>
+      <div class="body">
+<div class="flow"><div class="flow-box"><div class="t">Python calls an op</div><div class="d">e.g. a matmul inside a layer</div></div><div class="flow-arrow">→</div><div class="flow-box"><div class="t">Dispatcher</div><div class="d">checks dtype and device, picks a kernel: CPU work</div></div><div class="flow-arrow">→</div><div class="flow-box accent"><div class="t">Kernel launched</div><div class="d">queued on a CUDA stream; the call returns</div></div><div class="flow-arrow">→</div><div class="flow-box"><div class="t">GPU executes</div><div class="d">queued kernels, in order, later</div></div></div>
+<div class="cols-3"><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>What a naive timer measures:</b> wrapping a GPU call in <code class="inline">time.perf_counter()</code> measures how long it took to <i>queue</i> the work, not to do it.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Hidden syncs:</b> <code class="inline">.cpu()</code>, <code class="inline">.item()</code> or printing a tensor wait for the queue to drain, so a forward's cost can show up on a later, innocent line.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>The fix:</b> call <code class="inline">torch.cuda.synchronize()</code> (or the MPS equivalent) before reading the clock. The next slide shows the harness doing exactly that.</p></div></div>
+<div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Why this matters later:</b> launching is CPU work. If the kernels are small, the GPU finishes each one before Python has launched the next, and sits idle. That idle time is the <i>overhead</i> that compilation removes in section 3.</p></div>
+<div class="card tint-accent" style="padding:10px 16px;"><p class="small" style="margin:0;"><b>Key idea:</b> on a GPU, a timing without a synchronise is a timing of Python, not of the model.</p></div>
+      </div>
+    </section>
+
+    <!-- 13: HONEST TIMING -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Measure first</div>
+      <h2>GPU calls return before the work is done</h2>
+      <div class="body">
+        <div class="cols-2 fill">
+          <div class="col">
+            <div class="tag tag-existing" style="align-self:flex-start;">src/ltm_serve/model.py</div>
+            <pre class="code small" style="margin:0;" data-src="src/ltm_serve/model.py:37-42" data-sha256="2d840245a9a9">def synchronize(device: torch.device) -&gt; None:
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+    elif device.type == "mps":
+        torch.mps.synchronize()</pre>
+            <div class="tag tag-existing" style="align-self:flex-start;">src/ltm_serve/bench.py · timed()</div>
+            <pre class="code small" style="margin:0;" data-src="src/ltm_serve/bench.py:95-104" data-sha256="2e42310bfee0">…
+    for _ in range(warmup):
+        fn()
+    synchronize(device)
+    out = []
+    for _ in range(repeats):
+        t0 = time.perf_counter()
+        fn()
+        synchronize(device)
+        out.append(time.perf_counter() - t0)
+    return out</pre>
+          </div>
+          <div class="col">
+            <div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>1. Load once, warm up, synchronise.</b> Without a sync, GPU timings measure only the kernel <i>launch</i>. Warm-up calls absorb allocator growth and kernel selection.</p></div>
+            <div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>2. Percentiles over repeats</b>, not single runs.</p></div>
+            <div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>3. Quality next to latency.</b> Accuracy and log loss on held-out rows: a speed-up that changes predictions isn't a speed-up.</p></div>
+            <div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>4. A noise floor before claiming exactness</b> (next slide).</p></div>
+            <div class="card tint-warn" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>5. Isolate the machine.</b> A process from another session inflated the first Mac sweeps by 2–7× (cached 1-row: 879 ms instead of 128 ms). Kept as <code class="inline">*_contended.parquet</code> and re-run.</p></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 14: PRIMER PRECISION -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Primer · numeric precision</div>
+      <h2>bf16 halves the memory and changes the last digits</h2>
+      <div class="body">
+<table style="font-size:15px;"><tr><th>Format</th><th>Bits: sign / exponent / fraction</th><th>Range</th><th>TabFM weights</th></tr><tr><td>fp32</td><td>1 / 8 / 23</td><td>±3.4 × 10<sup>38</sup></td><td>6.6 GB</td></tr><tr><td><b>bf16</b> (brain float)</td><td>1 / 8 / 7</td><td>same as fp32</td><td><b>3.3 GB</b></td></tr><tr><td>fp16</td><td>1 / 5 / 10</td><td>±65,504</td><td>not used here</td></tr></table>
+<div class="cols-3"><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Why bf16:</b> fp32's exponent range in half the bytes, so values don't overflow the way fp16 can, and modern GPUs have fast kernels for it. The L4 serving numbers are all bf16.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Why outputs move:</b> libraries pick different kernels and summation orders for different batch shapes. Floating-point addition isn't associative, so identical maths rounds differently, and bf16 rounds more coarsely.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>What follows:</b> “exact” has to be defined against a measured noise floor (next slide). And precision is also a speed choice per device: on an ARM CPU bf16 was 5–11× <i>slower</i> (section 3).</p></div></div>
+<div class="card tint-accent" style="padding:10px 16px;"><p class="small" style="margin:0;"><b>Key idea:</b> in low precision, compare an optimisation against the model's own run-to-run noise, not against zero.</p></div>
+      </div>
+    </section>
+
+    <!-- 15: NOISE FLOOR -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Measure first</div>
+      <h2>Measure the noise floor before claiming "exact"</h2>
+      <div class="body">
+        <div class="card"><p style="margin:0;">In bf16, stock TabFM's own outputs change when you only change <b>which rows share a batch</b>. Mathematically nothing
+        changed (queries never attend to each other), so the difference is floating-point kernel noise. Judge the optimisation against that floor.</p></div>
+        <table>
+          <tr><th>Comparison</th><th>Precision · device</th><th>max |Δp|</th><th>Label agreement</th></tr>
+          <tr><td>Stock vs stock, only batch composition changed (<code class="inline">bench.bf16_noise_floor</code>)</td><td>bf16 · L4</td><td><b>0.013</b></td><td>–</td></tr>
+          <tr><td>Cached vs stock</td><td>bf16 · L4</td><td><b>0.034</b></td><td>100%</td></tr>
+          <tr><td>Cached vs stock</td><td>fp32 · CPU / MPS / L4</td><td><b>2.6e-6 / 2.2e-6 / 3e-6</b></td><td>100%</td></tr>
+        </table>
+        <div class="cols-3"><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Same order of magnitude</b> as stock's own noise, with 100% label agreement: that is how "exact up to floating point" was established rather than assumed.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b><code class="inline">tests/test_context_cache.py</code></b> compares against stock on penguins (categorical columns) and a padded 23-feature, 4-class task, members batched and one at a time.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;">It also checks that <b>predicting rows together equals predicting them one by one</b>: the test that licenses exact dynamic batching later.</p></div></div>
+      </div>
+    </section>
+
+    <!-- 16: WHICH_OPTIMISATION_MATTERS_DEPENDS_ON_YO -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Measure first</div>
+      <h2>Which optimisation matters depends on your data's shape</h2>
+      <div class="body" style="gap:10px;">
+        <div class="img-wrap"><img src="../figures/stages.png" alt="Stacked bars: share of stock predict time per model stage on L4 and M4 for 128/512/2048 rows and 10/64 features"></div>
+        <div class="cols-3"><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>What it shows:</b> share of stock <code class="inline">predict</code> time per top-level module (timed with hooks), for 3 context sizes × 2 widths. Totals above bars.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>10 features:</b> the in-context encoder (blue) takes 45–61% of the time on the L4, 56–69% on the M4.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>64 features:</b> column and row stages take 69–78%, because width enters the row transformer quadratically and the column stage linearly.</p></div></div>
+        <div class="card tint-accent" style="padding:10px 16px;"><p class="small" style="margin:0;"><b>Key idea:</b> sweep each axis (rows, features, request size, members) separately. A single benchmark shape hides which stage to attack.</p></div>
+      </div>
+    </section>
+
+    <!-- 17: CHECK MEASURE -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Check your understanding · measure first</div>
+      <h2>Answer these before moving on</h2>
+      <div class="body">
+<div class="col" style="gap:12px;"><div class="card" style="padding:14px 18px;"><p style="margin:0 0 8px;font-size:16px;"><b>1. You time model(x) on a GPU without synchronising and get 2 ms. What did you measure?</b></p><p class="small muted" style="margin:0;">Mostly the time to queue kernels. The GPU work finishes later and is charged to whichever line synchronises next.</p></div><div class="card" style="padding:14px 18px;"><p style="margin:0 0 8px;font-size:16px;"><b>2. Compiled FastAPI at 240 req/s: p50 117 ms, p99 2,943 ms. What does that gap tell you?</b></p><p class="small muted" style="margin:0;">Most requests are served quickly but some wait in a growing queue: the service is at or past saturation, even though the median looks healthy.</p></div><div class="card" style="padding:14px 18px;"><p style="margin:0 0 8px;font-size:16px;"><b>3. Cached and stock outputs differ by 0.034 in bf16. Is the cache wrong?</b></p><p class="small muted" style="margin:0;">Not by itself: stock differs from itself by 0.013 when only batch composition changes, labels agree 100%, and in fp32 the gap is ≤3e-6.</p></div></div>
+<div class="card" style="padding:10px 16px;"><p class="small" style="margin:0;"><b>Try it:</b> <code class="inline">uv run ltm-serve bench noise_floor stages --device mps</code> (or <code class="inline">--device cuda</code>), then <code class="inline">uv run ltm-serve plots</code>. Results land in <code class="inline">results/*.parquet</code>.</p></div>
+      </div>
+    </section>
+
+    <!-- 18: SECTION MODEL-LEVEL OPTIMISATION -->
+    <section class="slide section-slide">
+      <div class="num">Section 3 of 6</div>
+      <h1>Model-level optimisation</h1>
+      <p class="subtitle">Cache what doesn't change, batch what's independent, compile what's left, and choose precision per target.</p>
+    </section>
+
+    <!-- 19: CONTEXT CACHE CODE -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Model-level optimisation · 1. Exact context cache</div>
+      <h2>Encode the training rows once, keep K and V for every layer</h2>
+      <div class="body">
+        <div class="cols-2">
+          <span class="tag tag-existing" style="justify-self:start;">once per context · encode_context()</span>
+          <span class="tag tag-new" style="justify-self:start;">every request · _forward_impl()</span>
+        </div>
+        <div class="cols-2">
+          <pre class="code small" style="margin:0;" data-src="src/ltm_serve/context_cache.py:138-146" data-sha256="be4146b1b66f">…
+icl = model.icl_predictor
+r = r + _y_encode(icl, y, dtype)
+kv: list[tuple[Tensor, Tensor]] = []
+for blk in icl.tf_icl.blocks:
+    xn = blk.pre_attn_ln(r)
+    k, v = _project_kv(blk.attn, xn)
+    kv.append((k, v))
+    r = r + blk.post_attn_ln(_attend(blk.attn, xn, k, v))
+    r = r + blk._ff(r)
+…</pre>
+          <pre class="code small" style="margin:0;" data-src="src/ltm_serve/context_cache.py:172-176" data-sha256="82481427c239">…
+icl = model.icl_predictor
+for blk, (k, v) in zip(icl.tf_icl.blocks, cache.icl_kv, strict=True):
+    r = _block_with_kv(blk, r, k[sl], v[sl])
+out: Tensor = icl.decoder(icl.ln(r))
+return out</pre>
+        </div>
+        <div class="cols-3"><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>What's cached per member:</b> inducing-point states of each column set-transformer block (2 stages × 3 blocks) and the K/V projections of the training rows in each of the 24 in-context layers.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Per request:</b> query rows go through the per-row stages and cross-attend into those caches. Cost becomes O(query rows × context rows) in attention.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Wrap, don't fork:</b> <code class="inline">CachedTabFMClassifier</code> reuses the fitted classifier's preprocessing, ensembling, class-shift correction and logit averaging.</p></div></div>
+      </div>
+    </section>
+
+    <!-- 20: THE_CACHE_MADE_LATENCY_INDEPENDENT_OF_CO -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Model-level optimisation · 1. Exact context cache</div>
+      <h2>The cache made latency independent of context size</h2>
+      <div class="body" style="gap:10px;">
+        <div class="img-wrap"><img src="../figures/context_scaling.png" alt="Log-log plots: p50 latency vs context rows for stock and cached on L4 and M4; encode time and cache size vs context rows"></div>
+        <div class="cols-3"><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Left:</b> p50 of a 16-row request, 4 members. L4 stock slope 1.12 vs cached <b>0.06</b>. At 8,192 rows: <b>9.47 s → 129 ms (74×)</b>.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Why stock is ~linear on the L4:</b> at width 2048 the feed-forwards dominate until attention's T² term catches up, around 10⁴ rows. The M4's slope is 1.70: MPS falls back to an unfused attention kernel for boolean masks.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Right, the price:</b> the one-off encode and the bf16 cache both grow linearly with context: 7.4 s and 6.49 GB at 8,192 rows on the L4.</p></div></div>
+        <div class="card tint-accent" style="padding:10px 16px;"><p class="small" style="margin:0;"><b>Key idea:</b> a cache trades compute for memory. Latency stops growing with the table; memory starts (next slide).</p></div>
+      </div>
+    </section>
+
+    <!-- 21: CACHE MEMORY -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Model-level optimisation · 1. Exact context cache</div>
+      <h2>Cache memory, not the weights, limits contexts per GPU</h2>
+      <div class="body">
+        <table>
+          <tr><th style="text-align:right;">Context rows</th><th style="text-align:right;">L4 stock</th><th style="text-align:right;">L4 cached</th><th style="text-align:right;">Speed-up</th><th style="text-align:right;">One-off encode (L4)</th><th style="text-align:right;">Cache (bf16)</th></tr>
+          <tr><td style="text-align:right;">64</td><td style="text-align:right;">198 ms</td><td style="text-align:right;">113 ms</td><td style="text-align:right;">1.8×</td><td style="text-align:right;">0.15 s</td><td style="text-align:right;">94 MB</td></tr>
+          <tr><td style="text-align:right;">512</td><td style="text-align:right;">427 ms</td><td style="text-align:right;">110 ms</td><td style="text-align:right;">3.9×</td><td style="text-align:right;">0.36 s</td><td style="text-align:right;">447 MB</td></tr>
+          <tr><td style="text-align:right;">2,048</td><td style="text-align:right;">1,930 ms</td><td style="text-align:right;">125 ms</td><td style="text-align:right;">15×</td><td style="text-align:right;">1.6 s</td><td style="text-align:right;">1.65 GB</td></tr>
+          <tr><td style="text-align:right;">8,192</td><td style="text-align:right;">9,470 ms</td><td style="text-align:right;">129 ms</td><td style="text-align:right;"><b>74×</b></td><td style="text-align:right;">7.4 s</td><td style="text-align:right;">6.49 GB</td></tr>
+        </table>
+        <div class="cols-2">
+          <div class="card"><h3>~198 KB per context row per member</h3><p class="small" style="margin:0;">In bf16: 24 layers × K and V × 2048 dims × 2 bytes, plus the inducing-point states.
+          8,192 rows × 32 members would be <b>~52 GB</b>, more than twice an L4's memory.</p></div>
+          <div class="card tint-warn"><h3>It shapes the architecture</h3><p class="small" style="margin:0;">The speed-up grows with context size, and so does memory. Budget contexts in <b>bytes</b>, evict by LRU,
+          and route requests to the replica that already holds a context's cache.</p></div>
+        </div>
+        <div class="card tint-accent" style="padding:10px 16px;"><p class="small" style="margin:0;"><b>Key idea:</b> a cache's memory grows with what it stores (context rows × ensemble members), so budget and evict contexts by bytes, not by count.</p></div>
+      </div>
+    </section>
+
+    <!-- 22: WIDE_TABLES_STAY_EXPENSIVE,_EVEN_WITH_TH -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Model-level optimisation · other axes</div>
+      <h2>Wide tables stay expensive, even with the cache</h2>
+      <div class="body">
+        <div class="cols-2 fill" style="grid-template-columns:1.3fr 1fr;">
+          <div class="img-wrap"><img src="../figures/feature_scaling.png" alt="Log-log plot: p50 latency vs number of features at 256 context rows, stock and cached, L4 and M4"></div>
+          <div class="col" style="justify-content:center;"><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>What it shows:</b> p50 of a 16-row request at 256 context rows, sweeping table width from 4 to 100 features.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>L4 cached:</b> 86 → 394 ms.<br><b>L4 stock:</b> 191 → 1,201 ms.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Why the cache can't flatten this:</b> the row and column stages run per query row, and their cost grows with width.</p></div><div class="card tint-accent" style="padding:10px 16px;"><p class="small" style="margin:0;"><b>Key idea:</b> benchmark at your real table width. A narrow synthetic table flatters every number.</p></div></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 23: LATENCY_IS_FLAT_IN_REQUEST_SIZE,_SO_BATC -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Model-level optimisation · other axes</div>
+      <h2>Latency is flat in request size, so batching pays</h2>
+      <div class="body" style="gap:10px;">
+        <div class="img-wrap"><img src="../figures/query_scaling.png" alt="Log-log plots: p50 latency and rows per second vs rows per request at 512 context rows"></div>
+        <div class="cols-3"><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Left:</b> at 512 context rows, L4 cached latency stays at 105–116 ms from 1 to 64 rows per request and reaches 171 ms at 256.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Right:</b> that flat region turns into throughput: at 256 rows the L4 cached path does <b>1,497 rows/s vs 418 rows/s</b> for stock.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>The M4 (dashed) has no flat region:</b> cached latency climbs from 1 row on and throughput plateaus around 80 rows/s. Batching gains are device-specific.</p></div></div>
+        <div class="card tint-accent" style="padding:10px 16px;"><p class="small" style="margin:0;"><b>Key idea:</b> when the forward is flat in batch size, merging requests is nearly free. Classes, by contrast, cost nothing in latency (only decoder width changes).</p></div>
+      </div>
+    </section>
+
+    <!-- 24: 32_ENSEMBLE_MEMBERS_COST_8.6×_LATENCY_AN -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Model-level optimisation · 2. Ensemble size</div>
+      <h2>32 ensemble members cost 8.6× latency and bought nothing here</h2>
+      <div class="body" style="gap:10px;">
+        <div class="img-wrap"><img src="../figures/ensemble.png" alt="Left: p50 latency vs ensemble members on L4 and M4. Right: accuracy and log loss vs ensemble members"></div>
+        <div class="cols-3"><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Setup:</b> a deliberately harder synthetic task (512 rows, 20 features, 5 classes), 1-row requests, 1,024 held-out rows for quality.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Latency (L4):</b> 79 ms with 1 member → 678 ms with 32.<br><b>Quality:</b> accuracy 0.925–0.932 and log loss 0.243–0.253 at every size.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Earlier attempt:</b> the first task was too easy (accuracy flat at 97%). Made harder with <code class="inline">class_sep=0.5</code> plus log loss: still flat, a real finding.</p></div></div>
+        <div class="card tint-accent" style="padding:10px 16px;"><p class="small" style="margin:0;"><b>Key idea:</b> the default of 32 is tuned for leaderboard accuracy on diverse benchmarks. Measure quality against ensemble size on your real data before paying for it.</p></div>
+      </div>
+    </section>
+
+    <!-- 25: THE_LIBRARY_DEFAULT_RAN_ENSEMBLE_MEMBERS -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Model-level optimisation · 3. Batch the members</div>
+      <h2>The library default ran ensemble members one at a time</h2>
+      <div class="body">
+        <div class="cols-2 fill" style="grid-template-columns:1.3fr 1fr;">
+          <div class="img-wrap"><img src="../figures/member_batching.png" alt="Log-log plot: p50 latency vs ensemble members per forward pass, of 16, for 1-row and 64-row requests on L4 and M4"></div>
+          <div class="col" style="justify-content:center;"><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>What it shows:</b> 16 members, varying how many go through one forward pass (library default <code class="inline">batch_size=1</code>).</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>L4, 1-row request:</b> 1,137 ms one at a time → <b>230 ms</b> all in one forward (<b>5×</b>). 64-row requests follow the same curve.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Why:</b> the GPU is mostly idle between small kernels, so fewer, larger kernels win. The M4 (dashed) is noisier; its 64-row line even rises.</p></div><div class="card tint-accent" style="padding:10px 16px;"><p class="small" style="margin:0;"><b>Key idea:</b> audit library defaults. A notebook-friendly default can be a serving anti-pattern.</p></div></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 26: PRIMER OVERHEAD -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Primer · where GPU time goes</div>
+      <h2>A GPU can be slow for three different reasons</h2>
+      <div class="body">
+<div class="cols-3"><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>1. Compute-bound:</b> the GPU is busy with large matrix multiplications. Helps: faster kernels, lower precision, a bigger GPU.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>2. Memory-bound:</b> time goes into moving data, for example many small element-wise ops each reading and writing a tensor. Helps: fusing operations into one kernel.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>3. Overhead-bound:</b> the GPU finishes each kernel before Python launches the next. Helps: fewer, larger kernels, compilation, CUDA graphs.</p></div></div>
+<div class="card" style="padding:14px 18px;"><h3 style="font-size:17px;">How to tell which one you have</h3><p class="small" style="margin:0 0 6px;">Give the model more work and watch latency. If it grows in proportion, you are compute-bound. If it barely moves, you are paying a fixed cost per call: overhead.</p><p class="small" style="margin:0;"><b>This project:</b> the L4 cached forward took 111.5 ms for a 1-row request and 111.4 ms for 16 rows. 16× the work, the same latency: overhead-bound. The next slide shows where that time goes.</p></div>
+<div class="card tint-accent" style="padding:10px 16px;"><p class="small" style="margin:0;"><b>Key idea:</b> diagnose the regime before optimising. Lower precision can't help a GPU that is waiting for Python. (Framing from Horace He, <i>Making Deep Learning Go Brrrr From First Principles</i>.)</p></div>
+      </div>
+    </section>
+
+    <!-- 27: ONCE_CACHED,_THE_FORWARD_IS_MOSTLY_KERNE -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Model-level optimisation · 4. Compile</div>
+      <h2>Once cached, the forward is mostly kernel launches, not maths</h2>
+      <div class="body" style="gap:10px;">
+        <div class="img-wrap"><img src="../figures/overhead.png" alt="Stacked bars: host preprocessing vs forward pass per cached request for 1/8/64 rows and 1/4/16 members on L4 and M4"></div>
+        <div class="cols-3"><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Host preprocessing</b> (sklearn transforms, pandas) is the green sliver: only <b>4–7 ms</b> per request on the L4.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>The forward pass</b> takes 70–280 ms on the L4, and at a fixed member count it barely moves between 1 and 64 rows.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>So the time is Python dispatch and kernel launches:</b> 24 layers × dozens of ops × members. That's what compilation removes. (The M4 is compute-bound: its forward grows with rows.)</p></div></div>
+        <div class="card tint-accent" style="padding:10px 16px;"><p class="small" style="margin:0;"><b>Key idea:</b> small requests on a big GPU are overhead-bound: the fix is fewer kernel launches, not faster maths.</p></div>
+      </div>
+    </section>
+
+    <!-- 28: PRIMER COMPILE -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Primer · torch.compile and CUDA graphs</div>
+      <h2>Compilation turns thousands of kernel launches into a few</h2>
+      <div class="body">
+<div class="flow"><div class="flow-box warn"><div class="t">Eager PyTorch</div><div class="d">Python runs each op; each op launches its own kernel</div></div><div class="flow-arrow">→</div><div class="flow-box"><div class="t">torch.compile</div><div class="d">TorchDynamo captures the graph; TorchInductor fuses ops into generated kernels</div></div><div class="flow-arrow">→</div><div class="flow-box accent"><div class="t">+ CUDA graphs</div><div class="d">mode <b>reduce-overhead</b>: record the kernel sequence once, replay it in one call</div></div></div>
+<div class="cols-3"><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Graphs are specialised to shapes.</b> A new input shape means a new compile (seconds to minutes). CUDA graphs also pin memory addresses, so inputs are copied into fixed buffers.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>So servers bucket and warm up:</b> pad each batch to one of a few shapes (here 9 powers of two, 1 to 256 rows) and compile all of them before accepting traffic.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Two different Tritons:</b> Inductor writes its GPU kernels in OpenAI's <i>Triton language</i>. <i>NVIDIA Triton Inference Server</i> (section 4) is an unrelated serving product.</p></div></div>
+<div class="card tint-warn" style="padding:10px 16px;"><p class="small" style="margin:0;"><b>In production:</b> compilation moves cost from every request to start-up. Here the deployed warm-up took 20–23 min per cold replica, which matters as soon as you autoscale (section 5).</p></div>
+<div class="card tint-accent" style="padding:10px 16px;"><p class="small" style="margin:0;"><b>Key idea:</b> compile when you are overhead-bound, and pay the compile once, before traffic, not on the first user's request.</p></div>
+      </div>
+    </section>
+
+    <!-- 29: COMPILE RESULTS -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Model-level optimisation · 4. Compile</div>
+      <h2>Compiling removed three quarters of the cached forward: 111 → 28 ms</h2>
+      <div class="body">
+        <div class="cols-2 fill" style="grid-template-columns:1.3fr 1fr;">
+          <div class="img-wrap"><img src="../figures/compile.png" alt="Bar chart: p50 latency of the cached forward on L4 for eager, default compile and reduce-overhead, 1-row and 16-row requests"></div>
+          <div class="col" style="justify-content:center;"><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Cached forward on the L4</b> (512 context rows, 4 members):
+        <table style="margin-top:6px;font-size:13px;"><tr><th>Mode</th><th>p50 1 row</th><th>p99 1 row</th><th>p50 16 rows</th></tr>
+        <tr><td>eager</td><td>111.5 ms</td><td>133.7 ms</td><td>111.4 ms</td></tr>
+        <tr><td>default</td><td>34.8 ms</td><td>41.6 ms</td><td>34.7 ms</td></tr>
+        <tr><td>reduce-overhead</td><td><b>28.3 ms</b></td><td><b>32.6 ms</b></td><td>32.0 ms</td></tr></table></p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>reduce-overhead</b> = <code class="inline">torch.compile</code> plus CUDA graphs. The eager floor was kernel-launch overhead, not GPU compute.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Tail improved too:</b> p99 133.7 → 32.6 ms for a 1-row request.</p></div></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 30: BUCKETS AND WARM-UP -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Model-level optimisation · 4. Compile</div>
+      <h2>Bucket shapes, then warm up before reporting ready</h2>
+      <div class="body">
+        <div class="cols-2" style="grid-template-columns:1.3fr 1fr;">
+          <div class="col">
+            <div class="tag tag-existing" style="align-self:flex-start;">context_cache.py · pad rows to a power of two</div>
+            <pre class="code small" style="margin:0;font-size:12px;" data-src="src/ltm_serve/context_cache.py:273-276" data-sha256="690ebb253715">n_rows = members.shape[1]
+if self.bucket_rows:
+    padded = 1 &lt;&lt; max(0, (n_rows - 1).bit_length())
+    members = np.pad(members, ((0, 0), (0, padded - n_rows), (0, 0)))</pre>
+            <div class="tag tag-existing" style="align-self:flex-start;">context_cache.py · warm_up()</div>
+            <pre class="code small" style="margin:0;font-size:12px;" data-src="src/ltm_serve/context_cache.py:246-255" data-sha256="cd92e2764d4c">def warm_up(self, max_rows: int) -&gt; float:
+…
+    t0 = time.perf_counter()
+    n = 1
+    while n &lt;= max_rows:
+        self.predict_proba(pd.concat([self._example_row] * n, ignore_index=True))
+        n *= 2
+    synchronize(self.device)
+    return time.perf_counter() - t0</pre>
+          </div>
+          <div class="col">
+            <div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Still exact:</b> 1,024 context rows × 8 members, 256 query rows in bucketed batches of 37, bf16 on the L4.</p>
+            <table style="margin-top:6px;font-size:13px;"><tr><th>Comparison</th><th>max |Δp|</th><th>labels</th></tr>
+              <tr><td>eager cache vs stock</td><td>0.032</td><td>100%</td></tr>
+              <tr><td>compile default vs eager cache</td><td>0.042</td><td>100%</td></tr>
+              <tr><td>reduce-overhead vs eager cache</td><td>0.017</td><td>100%</td></tr></table></div>
+            <div class="card tint-warn" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>The price is warm-up:</b> compiling 9 row buckets (1…256) took <b>433 s</b> in a fresh process; deployed
+            reduce-overhead capture took <b>20–23 min</b>. Persist <code class="inline">TORCHINDUCTOR_CACHE_DIR</code> on a volume, bake cache artifacts into the image, or use dynamic shapes.</p></div>
+            <div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Warm up on the serving thread:</b> CUDA-graph trees are recorded per thread, so the engine fits, encodes and warms up on the executor thread that will serve the context.</p></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 31: PRECISION_IS_A_PER-TARGET_DECISION -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Model-level optimisation · 5. Device and precision</div>
+      <h2>The right precision depends on the device: bf16 was 5–11× slower on an ARM CPU</h2>
+      <div class="body">
+        <div class="cols-2 fill" style="grid-template-columns:1.3fr 1fr;">
+          <div class="img-wrap"><img src="../figures/precision.png" alt="Bar chart on log scale: p50 latency on Apple M4 for CPU and MPS in fp32 and bf16, stock vs cached, 128 context rows"></div>
+          <div class="col" style="justify-content:center;"><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>What it shows:</b> Apple M4, 128 context rows, 16-row request, stock vs cached across CPU/MPS × fp32/bf16.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>CPU: bf16 is 5–11× slower than fp32</b> (cached 4,960 vs 855 ms; stock 65,014 vs 14,269 ms). ARM CPUs have no fast bf16 matrix kernels. On MPS the two are close.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Cold-start trick:</b> <code class="inline">ltm-serve export-checkpoint</code> writes pre-cast weights; loading builds on the meta device. CPU load 0.75–1.34 s vs 22.5–27.5 s stock (safetensors mmap defers page faults to the first forward).</p></div><div class="card tint-accent" style="padding:10px 16px;"><p class="small" style="margin:0;"><b>Key idea:</b> the model's default precision was the wrong choice on ARM CPUs. bf16 on the L4, fp32 on ARM CPUs.</p></div></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 32: CHECK MODEL-LEVEL -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Check your understanding · model-level optimisation</div>
+      <h2>Answer these before moving on</h2>
+      <div class="body">
+<div class="col" style="gap:12px;"><div class="card" style="padding:14px 18px;"><p style="margin:0 0 8px;font-size:16px;"><b>1. Latency is the same for 1 and 64 rows per request. Which is more likely to help: lower precision, or compilation?</b></p><p class="small muted" style="margin:0;">Compilation. Flat latency means overhead-bound, so fewer kernel launches matter; lower precision speeds up compute that isn't the bottleneck.</p></div><div class="card" style="padding:14px 18px;"><p style="margin:0 0 8px;font-size:16px;"><b>2. Why does the context cache give 74× at 8,192 context rows but only 1.8× at 64?</b></p><p class="small muted" style="margin:0;">It removes the context's share of the work, which is small for a small table. The per-query work and launch overhead remain either way.</p></div><div class="card" style="padding:14px 18px;"><p style="margin:0 0 8px;font-size:16px;"><b>3. Why does the compiled service pad a 37-row batch to 64 rows, and why is that safe?</b></p><p class="small muted" style="margin:0;">Compiled graphs and CUDA graphs are specialised to shapes, so padding reuses one of 9 pre-warmed buckets. It is exact because rows never attend to each other.</p></div></div>
+<div class="card" style="padding:10px 16px;"><p class="small" style="margin:0;"><b>Try it:</b> <code class="inline">uv run ltm-serve bench context_scaling member_batching --device mps</code>. The <code class="inline">compile</code> sweep needs <code class="inline">--device cuda</code>; on a GPU compare its three modes with the table in this section.</p></div>
+      </div>
+    </section>
+
+    <!-- 33: SECTION SERVING AND LOAD TESTING -->
+    <section class="slide section-slide">
+      <div class="num">Section 4 of 6</div>
+      <h1>Serving and load testing</h1>
+      <p class="subtitle">An API shaped by the model, a batcher that is exact, and a load test you can believe.</p>
+    </section>
+
+    <!-- 34: PRIMER REQUEST ANATOMY -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Primer · anatomy of an online request</div>
+      <h2>A request's latency is queue wait plus service time</h2>
+      <div class="body">
+<div class="flow"><div class="flow-box"><div class="t">Client</div><div class="d">sends HTTP</div></div><div class="flow-arrow">→</div><div class="flow-box"><div class="t">Front end</div><div class="d">parse JSON or tensors</div></div><div class="flow-arrow">→</div><div class="flow-box warn"><div class="t">Queue</div><div class="d">wait for the model</div></div><div class="flow-arrow">→</div><div class="flow-box"><div class="t">Batcher</div><div class="d">merge with other requests</div></div><div class="flow-arrow">→</div><div class="flow-box"><div class="t">Preprocess</div><div class="d">encode rows: 4–7 ms here</div></div><div class="flow-arrow">→</div><div class="flow-box accent"><div class="t">GPU forward</div><div class="d">the model itself</div></div><div class="flow-arrow">→</div><div class="flow-box"><div class="t">Respond</div><div class="d">split per request, serialise</div></div></div>
+<div class="cols-3"><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Service time:</b> work done on your behalf: preprocessing, the forward and serialisation. Roughly fixed for a given batch shape.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Queue wait:</b> time spent waiting because the model was busy with earlier requests. Near zero at low load; the dominant term near saturation.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Measure them separately.</b> The FastAPI service exports <code class="inline">ltm_queue_wait_seconds</code> and <code class="inline">ltm_inference_seconds</code>, so a slow p99 can be attributed to one or the other.</p></div></div>
+<div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Who does each step:</b> in the FastAPI service, one Python process does everything from parsing to splitting. In Triton, the front end, queue and batcher are C++, and only preprocess, forward and splitting run in Python. That difference decides the results in section 5.</p></div>
+<div class="card tint-accent" style="padding:10px 16px;"><p class="small" style="margin:0;"><b>Key idea:</b> when latency rises under load, first ask whether requests are waiting or working.</p></div>
+      </div>
+    </section>
+
+    <!-- 35: PRIMER QUEUEING -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Primer · queueing and the knee</div>
+      <h2>Latency explodes as a server approaches 100% busy</h2>
+      <div class="body">
+<div class="cols-2"><div class="card" style="padding:12px 16px;"><h3 style="font-size:16px;">Textbook intuition</h3><table style="font-size:14.5px;"><tr><th>Utilisation ρ</th><th>Mean time in system</th></tr><tr><td>50%</td><td>2 × service time</td></tr><tr><td>80%</td><td>5 ×</td></tr><tr><td>90%</td><td>10 ×</td></tr><tr><td>95%</td><td>20 ×</td></tr></table><p class="small muted" style="margin:6px 0 0;font-size:13px;">Single-server queue with random arrivals (M/M/1): T = S / (1 − ρ). An intuition for the shape, not a model of a batching server.</p></div><div class="card" style="padding:12px 16px;"><h3 style="font-size:16px;">Measured: eager FastAPI on the L4</h3><table style="font-size:14.5px;"><tr><th>Offered</th><th>Achieved</th><th>p99</th></tr><tr><td>80 req/s</td><td>81</td><td>381 ms</td></tr><tr><td>160 req/s</td><td>161</td><td>673 ms</td></tr><tr><td>240 req/s</td><td>239 (13 dropped)</td><td>850 ms</td></tr><tr><td>320 req/s</td><td><b>285</b> (941 dropped)</td><td><b>2,045 ms</b></td></tr></table><p class="small muted" style="margin:6px 0 0;font-size:13px;">From 80 to 240 req/s p99 grows 2.2×; one more step and it grows another 2.4× while requests are dropped.</p></div></div>
+<div class="cols-2"><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Why it curves:</b> arrivals are random. At high utilisation a short burst builds a queue, and the server has almost no idle time left to drain it, so waits compound.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>The knee:</b> the load where latency starts rising steeply. In this deck, the <i>knee</i> is the first offered rate at which requests are dropped or achieved throughput falls below offered.</p></div></div>
+<div class="card tint-accent" style="padding:10px 16px;"><p class="small" style="margin:0;"><b>Key idea:</b> never plan to run at the knee. Capacity is the highest load that still meets the p99 target, with headroom for bursts.</p></div>
+      </div>
+    </section>
+
+    <!-- 36: PRIMER BATCHING -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Primer · batching</div>
+      <h2>Dynamic batching trades a little latency for a lot of throughput</h2>
+      <div class="body">
+<div class="cols-3"><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>No batching:</b> one request per forward. Simple, but the GPU idles between tiny calls and throughput is capped by one forward's latency.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Static batching:</b> wait until N requests arrive. High throughput, but at low load the first request waits for strangers who may not come.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Dynamic batching:</b> when the model frees up, take everything that queued meanwhile, up to a cap. Optionally wait a few ms for more.</p></div></div>
+<div class="card" style="padding:14px 18px;"><h3 style="font-size:17px;">Worked example: batches size themselves to the load</h3><p class="small" style="margin:0;">Eager Triton on the L4 took ~190 ms per forward. At 400 req/s, about 400 × 0.19 ≈ 76 requests arrive during each forward, and all of them go into the next batch. Triton's own metrics showed <b>~73 requests per batch</b> at 400+ req/s and ~21 at 240. That is how one eager instance kept up with 400 req/s.</p></div>
+<div class="cols-2"><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>The knobs:</b> a maximum batch size (bounds memory and compiled shapes) and a maximum queue delay (extra wait for fuller batches). This project uses a delay of 0.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>LLM servers go further:</b> they add and remove sequences between generated tokens (iteration-level batching). One forward answers a TabFM request, so request-level batching is enough.</p></div></div>
+<div class="card tint-accent" style="padding:10px 16px;"><p class="small" style="margin:0;"><b>Key idea:</b> batching is only safe when requests can't influence each other. For TabFM the attention masks guarantee it; for many models it must be checked.</p></div>
+      </div>
+    </section>
+
+    <!-- 37: SERVICE DESIGN -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Serving · FastAPI service</div>
+      <h2>A context is a first-class resource in the API</h2>
+      <div class="body" style="gap:8px;">
+        <div class="img-wrap" style="overflow:hidden;"><svg id="mmd-service" width="100%" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" style="max-width: 1021px; background-color: transparent;" viewBox="-50 -10 1021 593" role="graphics-document document" aria-roledescription="sequence"><g><line id="actor4" x1="846" y1="65" x2="846" y2="2000" class="actor-line 200" stroke-width="0.5px" stroke="#999" name="X" data-et="life-line" data-id="X"/><g id="root-4" data-et="participant" data-type="participant" data-id="X"><rect x="771" y="0" fill="#eaeaea" stroke="#666" width="150" height="65" name="X" rx="3" ry="3" class="actor actor-top"/><text x="846" y="32.5" dominant-baseline="central" alignment-baseline="central" class="actor actor-box" style="text-anchor: middle; font-size: 16px; font-weight: 400;"><tspan x="846" dy="0">Executor + GPU</tspan></text></g></g><g><line id="actor3" x1="666" y1="65" x2="666" y2="2000" class="actor-line 200" stroke-width="0.5px" stroke="#999" name="B" data-et="life-line" data-id="B"/><g id="root-3" data-et="participant" data-type="participant" data-id="B"><rect x="591" y="0" fill="#eaeaea" stroke="#666" width="150" height="65" name="B" rx="3" ry="3" class="actor actor-top"/><text x="666" y="32.5" dominant-baseline="central" alignment-baseline="central" class="actor actor-box" style="text-anchor: middle; font-size: 16px; font-weight: 400;"><tspan x="666" dy="0">Batcher</tspan></text></g></g><g><line id="actor2" x1="486" y1="65" x2="486" y2="2000" class="actor-line 200" stroke-width="0.5px" stroke="#999" name="E" data-et="life-line" data-id="E"/><g id="root-2" data-et="participant" data-type="participant" data-id="E"><rect x="411" y="0" fill="#eaeaea" stroke="#666" width="150" height="65" name="E" rx="3" ry="3" class="actor actor-top"/><text x="486" y="32.5" dominant-baseline="central" alignment-baseline="central" class="actor actor-box" style="text-anchor: middle; font-size: 16px; font-weight: 400;"><tspan x="486" dy="0">Engine</tspan></text></g></g><g><line id="actor1" x1="306" y1="65" x2="306" y2="2000" class="actor-line 200" stroke-width="0.5px" stroke="#999" name="API" data-et="life-line" data-id="API"/><g id="root-1" data-et="participant" data-type="participant" data-id="API"><rect x="231" y="0" fill="#eaeaea" stroke="#666" width="150" height="65" name="API" rx="3" ry="3" class="actor actor-top"/><text x="306" y="32.5" dominant-baseline="central" alignment-baseline="central" class="actor actor-box" style="text-anchor: middle; font-size: 16px; font-weight: 400;"><tspan x="306" dy="0">FastAPI</tspan></text></g></g><g><line id="actor0" x1="75" y1="65" x2="75" y2="2000" class="actor-line 200" stroke-width="0.5px" stroke="#999" name="C" data-et="life-line" data-id="C"/><g id="root-0" data-et="participant" data-type="participant" data-id="C"><rect x="0" y="0" fill="#eaeaea" stroke="#666" width="150" height="65" name="C" rx="3" ry="3" class="actor actor-top"/><text x="75" y="32.5" dominant-baseline="central" alignment-baseline="central" class="actor actor-box" style="text-anchor: middle; font-size: 16px; font-weight: 400;"><tspan x="75" dy="0">Client</tspan></text></g></g><style>#mmd-service{font-family:Arial,Helvetica,sans-serif;font-size:16px;fill:#2b2620;}@keyframes edge-animation-frame{from{stroke-dashoffset:0;}}@keyframes dash{to{stroke-dashoffset:0;}}#mmd-service .edge-animation-slow{stroke-dasharray:9,5!important;stroke-dashoffset:900;animation:dash 50s linear infinite;stroke-linecap:round;}#mmd-service .edge-animation-fast{stroke-dasharray:9,5!important;stroke-dashoffset:900;animation:dash 20s linear infinite;stroke-linecap:round;}#mmd-service .error-icon{fill:#faf6ee;}#mmd-service .error-text{fill:#050911;stroke:#050911;}#mmd-service .edge-thickness-normal{stroke-width:1px;}#mmd-service .edge-thickness-thick{stroke-width:3.5px;}#mmd-service .edge-pattern-solid{stroke-dasharray:0;}#mmd-service .edge-thickness-invisible{stroke-width:0;fill:none;}#mmd-service .edge-pattern-dashed{stroke-dasharray:3;}#mmd-service .edge-pattern-dotted{stroke-dasharray:2;}#mmd-service .marker{fill:#8a8069;stroke:#8a8069;}#mmd-service .marker.cross{stroke:#8a8069;}#mmd-service svg{font-family:Arial,Helvetica,sans-serif;font-size:16px;}#mmd-service p{margin:0;}#mmd-service .actor{stroke:#7a7f1f;fill:#ffffff;stroke-width:1;}#mmd-service rect.actor.outer-path[data-look="neo"]{filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#mmd-service rect.note[data-look="neo"]{stroke:#8a8069;fill:#f2ecdf;filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#mmd-service text.actor&gt;tspan{fill:#2b2620;stroke:none;}#mmd-service .actor-line{stroke:#7a7f1f;}#mmd-service .innerArc{stroke-width:1.5;stroke-dasharray:none;}#mmd-service .messageLine0{stroke-width:1.5;stroke-dasharray:none;stroke:#3d372e;}#mmd-service .messageLine1{stroke-width:1.5;stroke-dasharray:2,2;stroke:#3d372e;}#mmd-service [id$="-arrowhead"] path{fill:#3d372e;stroke:#3d372e;}#mmd-service .sequenceNumber{fill:#757f96;}#mmd-service [id$="-sequencenumber"]{fill:#3d372e;}#mmd-service [id$="-crosshead"] path{fill:#3d372e;stroke:#3d372e;}#mmd-service .messageText{fill:#2b2620;stroke:none;}#mmd-service .labelBox{stroke:#7a7f1f;fill:#ffffff;filter:none;}#mmd-service .labelText,#mmd-service .labelText&gt;tspan{fill:#2b2620;stroke:none;}#mmd-service .loopText,#mmd-service .loopText&gt;tspan{fill:#2b2620;stroke:none;}#mmd-service .sectionTitle,#mmd-service .sectionTitle&gt;tspan{fill:#2b2620;stroke:none;}#mmd-service .loopLine{stroke-width:2px;stroke-dasharray:2,2;stroke:#7a7f1f;fill:#7a7f1f;}#mmd-service .note{stroke:#8a8069;fill:#f2ecdf;}#mmd-service .noteText,#mmd-service .noteText&gt;tspan{fill:#333;stroke:none;font-weight:normal;}#mmd-service .activation0{fill:#f2ecdf;stroke:hsl(41.0526315789, 42.2222222222%, 81.1764705882%);}#mmd-service .activation1{fill:#f2ecdf;stroke:hsl(41.0526315789, 42.2222222222%, 81.1764705882%);}#mmd-service .activation2{fill:#f2ecdf;stroke:hsl(41.0526315789, 42.2222222222%, 81.1764705882%);}#mmd-service .actorPopupMenu{position:absolute;}#mmd-service .actorPopupMenuPanel{position:absolute;fill:#ffffff;box-shadow:0px 8px 16px 0px rgba(0,0,0,0.2);filter:drop-shadow(3px 5px 2px rgb(0 0 0 / 0.4));}#mmd-service .actor-man circle,#mmd-service line{fill:#ffffff;stroke-width:2px;}#mmd-service g rect.rect{filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));stroke:#7a7f1f;}#mmd-service .node .neo-node{stroke:#7a7f1f;}#mmd-service [data-look="neo"].node rect,#mmd-service [data-look="neo"].cluster rect,#mmd-service [data-look="neo"].node polygon{stroke:url(#mmd-service-gradient);filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#mmd-service [data-look="neo"].swimlane.cluster rect{filter:none;}#mmd-service [data-look="neo"].node path{stroke:url(#mmd-service-gradient);stroke-width:1px;}#mmd-service [data-look="neo"].node .outer-path{filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#mmd-service [data-look="neo"].node .neo-line path{stroke:#7a7f1f;filter:none;}#mmd-service [data-look="neo"].node circle{stroke:url(#mmd-service-gradient);filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#mmd-service [data-look="neo"].node circle .state-start{fill:#000000;}#mmd-service [data-look="neo"].icon-shape .icon{fill:url(#mmd-service-gradient);filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#mmd-service [data-look="neo"].icon-shape .icon-neo path{stroke:url(#mmd-service-gradient);filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#mmd-service :root{--mermaid-font-family:"trebuchet ms",verdana,arial,sans-serif;}</style><g/><defs><symbol id="mmd-service-computer" width="24" height="24"><path transform="scale(.5)" d="M2 2v13h20v-13h-20zm18 11h-16v-9h16v9zm-10.228 6l.466-1h3.524l.467 1h-4.457zm14.228 3h-24l2-6h2.104l-1.33 4h18.45l-1.297-4h2.073l2 6zm-5-10h-14v-7h14v7z"/></symbol></defs><defs><symbol id="mmd-service-database" fill-rule="evenodd" clip-rule="evenodd"><path transform="scale(.5)" d="M12.258.001l.256.004.255.005.253.008.251.01.249.012.247.015.246.016.242.019.241.02.239.023.236.024.233.027.231.028.229.031.225.032.223.034.22.036.217.038.214.04.211.041.208.043.205.045.201.046.198.048.194.05.191.051.187.053.183.054.18.056.175.057.172.059.168.06.163.061.16.063.155.064.15.066.074.033.073.033.071.034.07.034.069.035.068.035.067.035.066.035.064.036.064.036.062.036.06.036.06.037.058.037.058.037.055.038.055.038.053.038.052.038.051.039.05.039.048.039.047.039.045.04.044.04.043.04.041.04.04.041.039.041.037.041.036.041.034.041.033.042.032.042.03.042.029.042.027.042.026.043.024.043.023.043.021.043.02.043.018.044.017.043.015.044.013.044.012.044.011.045.009.044.007.045.006.045.004.045.002.045.001.045v17l-.001.045-.002.045-.004.045-.006.045-.007.045-.009.044-.011.045-.012.044-.013.044-.015.044-.017.043-.018.044-.02.043-.021.043-.023.043-.024.043-.026.043-.027.042-.029.042-.03.042-.032.042-.033.042-.034.041-.036.041-.037.041-.039.041-.04.041-.041.04-.043.04-.044.04-.045.04-.047.039-.048.039-.05.039-.051.039-.052.038-.053.038-.055.038-.055.038-.058.037-.058.037-.06.037-.06.036-.062.036-.064.036-.064.036-.066.035-.067.035-.068.035-.069.035-.07.034-.071.034-.073.033-.074.033-.15.066-.155.064-.16.063-.163.061-.168.06-.172.059-.175.057-.18.056-.183.054-.187.053-.191.051-.194.05-.198.048-.201.046-.205.045-.208.043-.211.041-.214.04-.217.038-.22.036-.223.034-.225.032-.229.031-.231.028-.233.027-.236.024-.239.023-.241.02-.242.019-.246.016-.247.015-.249.012-.251.01-.253.008-.255.005-.256.004-.258.001-.258-.001-.256-.004-.255-.005-.253-.008-.251-.01-.249-.012-.247-.015-.245-.016-.243-.019-.241-.02-.238-.023-.236-.024-.234-.027-.231-.028-.228-.031-.226-.032-.223-.034-.22-.036-.217-.038-.214-.04-.211-.041-.208-.043-.204-.045-.201-.046-.198-.048-.195-.05-.19-.051-.187-.053-.184-.054-.179-.056-.176-.057-.172-.059-.167-.06-.164-.061-.159-.063-.155-.064-.151-.066-.074-.033-.072-.033-.072-.034-.07-.034-.069-.035-.068-.035-.067-.035-.066-.035-.064-.036-.063-.036-.062-.036-.061-.036-.06-.037-.058-.037-.057-.037-.056-.038-.055-.038-.053-.038-.052-.038-.051-.039-.049-.039-.049-.039-.046-.039-.046-.04-.044-.04-.043-.04-.041-.04-.04-.041-.039-.041-.037-.041-.036-.041-.034-.041-.033-.042-.032-.042-.03-.042-.029-.042-.027-.042-.026-.043-.024-.043-.023-.043-.021-.043-.02-.043-.018-.044-.017-.043-.015-.044-.013-.044-.012-.044-.011-.045-.009-.044-.007-.045-.006-.045-.004-.045-.002-.045-.001-.045v-17l.001-.045.002-.045.004-.045.006-.045.007-.045.009-.044.011-.045.012-.044.013-.044.015-.044.017-.043.018-.044.02-.043.021-.043.023-.043.024-.043.026-.043.027-.042.029-.042.03-.042.032-.042.033-.042.034-.041.036-.041.037-.041.039-.041.04-.041.041-.04.043-.04.044-.04.046-.04.046-.039.049-.039.049-.039.051-.039.052-.038.053-.038.055-.038.056-.038.057-.037.058-.037.06-.037.061-.036.062-.036.063-.036.064-.036.066-.035.067-.035.068-.035.069-.035.07-.034.072-.034.072-.033.074-.033.151-.066.155-.064.159-.063.164-.061.167-.06.172-.059.176-.057.179-.056.184-.054.187-.053.19-.051.195-.05.198-.048.201-.046.204-.045.208-.043.211-.041.214-.04.217-.038.22-.036.223-.034.226-.032.228-.031.231-.028.234-.027.236-.024.238-.023.241-.02.243-.019.245-.016.247-.015.249-.012.251-.01.253-.008.255-.005.256-.004.258-.001.258.001zm-9.258 20.499v.01l.001.021.003.021.004.022.005.021.006.022.007.022.009.023.01.022.011.023.012.023.013.023.015.023.016.024.017.023.018.024.019.024.021.024.022.025.023.024.024.025.052.049.056.05.061.051.066.051.07.051.075.051.079.052.084.052.088.052.092.052.097.052.102.051.105.052.11.052.114.051.119.051.123.051.127.05.131.05.135.05.139.048.144.049.147.047.152.047.155.047.16.045.163.045.167.043.171.043.176.041.178.041.183.039.187.039.19.037.194.035.197.035.202.033.204.031.209.03.212.029.216.027.219.025.222.024.226.021.23.02.233.018.236.016.24.015.243.012.246.01.249.008.253.005.256.004.259.001.26-.001.257-.004.254-.005.25-.008.247-.011.244-.012.241-.014.237-.016.233-.018.231-.021.226-.021.224-.024.22-.026.216-.027.212-.028.21-.031.205-.031.202-.034.198-.034.194-.036.191-.037.187-.039.183-.04.179-.04.175-.042.172-.043.168-.044.163-.045.16-.046.155-.046.152-.047.148-.048.143-.049.139-.049.136-.05.131-.05.126-.05.123-.051.118-.052.114-.051.11-.052.106-.052.101-.052.096-.052.092-.052.088-.053.083-.051.079-.052.074-.052.07-.051.065-.051.06-.051.056-.05.051-.05.023-.024.023-.025.021-.024.02-.024.019-.024.018-.024.017-.024.015-.023.014-.024.013-.023.012-.023.01-.023.01-.022.008-.022.006-.022.006-.022.004-.022.004-.021.001-.021.001-.021v-4.127l-.077.055-.08.053-.083.054-.085.053-.087.052-.09.052-.093.051-.095.05-.097.05-.1.049-.102.049-.105.048-.106.047-.109.047-.111.046-.114.045-.115.045-.118.044-.12.043-.122.042-.124.042-.126.041-.128.04-.13.04-.132.038-.134.038-.135.037-.138.037-.139.035-.142.035-.143.034-.144.033-.147.032-.148.031-.15.03-.151.03-.153.029-.154.027-.156.027-.158.026-.159.025-.161.024-.162.023-.163.022-.165.021-.166.02-.167.019-.169.018-.169.017-.171.016-.173.015-.173.014-.175.013-.175.012-.177.011-.178.01-.179.008-.179.008-.181.006-.182.005-.182.004-.184.003-.184.002h-.37l-.184-.002-.184-.003-.182-.004-.182-.005-.181-.006-.179-.008-.179-.008-.178-.01-.176-.011-.176-.012-.175-.013-.173-.014-.172-.015-.171-.016-.17-.017-.169-.018-.167-.019-.166-.02-.165-.021-.163-.022-.162-.023-.161-.024-.159-.025-.157-.026-.156-.027-.155-.027-.153-.029-.151-.03-.15-.03-.148-.031-.146-.032-.145-.033-.143-.034-.141-.035-.14-.035-.137-.037-.136-.037-.134-.038-.132-.038-.13-.04-.128-.04-.126-.041-.124-.042-.122-.042-.12-.044-.117-.043-.116-.045-.113-.045-.112-.046-.109-.047-.106-.047-.105-.048-.102-.049-.1-.049-.097-.05-.095-.05-.093-.052-.09-.051-.087-.052-.085-.053-.083-.054-.08-.054-.077-.054v4.127zm0-5.654v.011l.001.021.003.021.004.021.005.022.006.022.007.022.009.022.01.022.011.023.012.023.013.023.015.024.016.023.017.024.018.024.019.024.021.024.022.024.023.025.024.024.052.05.056.05.061.05.066.051.07.051.075.052.079.051.084.052.088.052.092.052.097.052.102.052.105.052.11.051.114.051.119.052.123.05.127.051.131.05.135.049.139.049.144.048.147.048.152.047.155.046.16.045.163.045.167.044.171.042.176.042.178.04.183.04.187.038.19.037.194.036.197.034.202.033.204.032.209.03.212.028.216.027.219.025.222.024.226.022.23.02.233.018.236.016.24.014.243.012.246.01.249.008.253.006.256.003.259.001.26-.001.257-.003.254-.006.25-.008.247-.01.244-.012.241-.015.237-.016.233-.018.231-.02.226-.022.224-.024.22-.025.216-.027.212-.029.21-.03.205-.032.202-.033.198-.035.194-.036.191-.037.187-.039.183-.039.179-.041.175-.042.172-.043.168-.044.163-.045.16-.045.155-.047.152-.047.148-.048.143-.048.139-.05.136-.049.131-.05.126-.051.123-.051.118-.051.114-.052.11-.052.106-.052.101-.052.096-.052.092-.052.088-.052.083-.052.079-.052.074-.051.07-.052.065-.051.06-.05.056-.051.051-.049.023-.025.023-.024.021-.025.02-.024.019-.024.018-.024.017-.024.015-.023.014-.023.013-.024.012-.022.01-.023.01-.023.008-.022.006-.022.006-.022.004-.021.004-.022.001-.021.001-.021v-4.139l-.077.054-.08.054-.083.054-.085.052-.087.053-.09.051-.093.051-.095.051-.097.05-.1.049-.102.049-.105.048-.106.047-.109.047-.111.046-.114.045-.115.044-.118.044-.12.044-.122.042-.124.042-.126.041-.128.04-.13.039-.132.039-.134.038-.135.037-.138.036-.139.036-.142.035-.143.033-.144.033-.147.033-.148.031-.15.03-.151.03-.153.028-.154.028-.156.027-.158.026-.159.025-.161.024-.162.023-.163.022-.165.021-.166.02-.167.019-.169.018-.169.017-.171.016-.173.015-.173.014-.175.013-.175.012-.177.011-.178.009-.179.009-.179.007-.181.007-.182.005-.182.004-.184.003-.184.002h-.37l-.184-.002-.184-.003-.182-.004-.182-.005-.181-.007-.179-.007-.179-.009-.178-.009-.176-.011-.176-.012-.175-.013-.173-.014-.172-.015-.171-.016-.17-.017-.169-.018-.167-.019-.166-.02-.165-.021-.163-.022-.162-.023-.161-.024-.159-.025-.157-.026-.156-.027-.155-.028-.153-.028-.151-.03-.15-.03-.148-.031-.146-.033-.145-.033-.143-.033-.141-.035-.14-.036-.137-.036-.136-.037-.134-.038-.132-.039-.13-.039-.128-.04-.126-.041-.124-.042-.122-.043-.12-.043-.117-.044-.116-.044-.113-.046-.112-.046-.109-.046-.106-.047-.105-.048-.102-.049-.1-.049-.097-.05-.095-.051-.093-.051-.09-.051-.087-.053-.085-.052-.083-.054-.08-.054-.077-.054v4.139zm0-5.666v.011l.001.02.003.022.004.021.005.022.006.021.007.022.009.023.01.022.011.023.012.023.013.023.015.023.016.024.017.024.018.023.019.024.021.025.022.024.023.024.024.025.052.05.056.05.061.05.066.051.07.051.075.052.079.051.084.052.088.052.092.052.097.052.102.052.105.051.11.052.114.051.119.051.123.051.127.05.131.05.135.05.139.049.144.048.147.048.152.047.155.046.16.045.163.045.167.043.171.043.176.042.178.04.183.04.187.038.19.037.194.036.197.034.202.033.204.032.209.03.212.028.216.027.219.025.222.024.226.021.23.02.233.018.236.017.24.014.243.012.246.01.249.008.253.006.256.003.259.001.26-.001.257-.003.254-.006.25-.008.247-.01.244-.013.241-.014.237-.016.233-.018.231-.02.226-.022.224-.024.22-.025.216-.027.212-.029.21-.03.205-.032.202-.033.198-.035.194-.036.191-.037.187-.039.183-.039.179-.041.175-.042.172-.043.168-.044.163-.045.16-.045.155-.047.152-.047.148-.048.143-.049.139-.049.136-.049.131-.051.126-.05.123-.051.118-.052.114-.051.11-.052.106-.052.101-.052.096-.052.092-.052.088-.052.083-.052.079-.052.074-.052.07-.051.065-.051.06-.051.056-.05.051-.049.023-.025.023-.025.021-.024.02-.024.019-.024.018-.024.017-.024.015-.023.014-.024.013-.023.012-.023.01-.022.01-.023.008-.022.006-.022.006-.022.004-.022.004-.021.001-.021.001-.021v-4.153l-.077.054-.08.054-.083.053-.085.053-.087.053-.09.051-.093.051-.095.051-.097.05-.1.049-.102.048-.105.048-.106.048-.109.046-.111.046-.114.046-.115.044-.118.044-.12.043-.122.043-.124.042-.126.041-.128.04-.13.039-.132.039-.134.038-.135.037-.138.036-.139.036-.142.034-.143.034-.144.033-.147.032-.148.032-.15.03-.151.03-.153.028-.154.028-.156.027-.158.026-.159.024-.161.024-.162.023-.163.023-.165.021-.166.02-.167.019-.169.018-.169.017-.171.016-.173.015-.173.014-.175.013-.175.012-.177.01-.178.01-.179.009-.179.007-.181.006-.182.006-.182.004-.184.003-.184.001-.185.001-.185-.001-.184-.001-.184-.003-.182-.004-.182-.006-.181-.006-.179-.007-.179-.009-.178-.01-.176-.01-.176-.012-.175-.013-.173-.014-.172-.015-.171-.016-.17-.017-.169-.018-.167-.019-.166-.02-.165-.021-.163-.023-.162-.023-.161-.024-.159-.024-.157-.026-.156-.027-.155-.028-.153-.028-.151-.03-.15-.03-.148-.032-.146-.032-.145-.033-.143-.034-.141-.034-.14-.036-.137-.036-.136-.037-.134-.038-.132-.039-.13-.039-.128-.041-.126-.041-.124-.041-.122-.043-.12-.043-.117-.044-.116-.044-.113-.046-.112-.046-.109-.046-.106-.048-.105-.048-.102-.048-.1-.05-.097-.049-.095-.051-.093-.051-.09-.052-.087-.052-.085-.053-.083-.053-.08-.054-.077-.054v4.153zm8.74-8.179l-.257.004-.254.005-.25.008-.247.011-.244.012-.241.014-.237.016-.233.018-.231.021-.226.022-.224.023-.22.026-.216.027-.212.028-.21.031-.205.032-.202.033-.198.034-.194.036-.191.038-.187.038-.183.04-.179.041-.175.042-.172.043-.168.043-.163.045-.16.046-.155.046-.152.048-.148.048-.143.048-.139.049-.136.05-.131.05-.126.051-.123.051-.118.051-.114.052-.11.052-.106.052-.101.052-.096.052-.092.052-.088.052-.083.052-.079.052-.074.051-.07.052-.065.051-.06.05-.056.05-.051.05-.023.025-.023.024-.021.024-.02.025-.019.024-.018.024-.017.023-.015.024-.014.023-.013.023-.012.023-.01.023-.01.022-.008.022-.006.023-.006.021-.004.022-.004.021-.001.021-.001.021.001.021.001.021.004.021.004.022.006.021.006.023.008.022.01.022.01.023.012.023.013.023.014.023.015.024.017.023.018.024.019.024.02.025.021.024.023.024.023.025.051.05.056.05.06.05.065.051.07.052.074.051.079.052.083.052.088.052.092.052.096.052.101.052.106.052.11.052.114.052.118.051.123.051.126.051.131.05.136.05.139.049.143.048.148.048.152.048.155.046.16.046.163.045.168.043.172.043.175.042.179.041.183.04.187.038.191.038.194.036.198.034.202.033.205.032.21.031.212.028.216.027.22.026.224.023.226.022.231.021.233.018.237.016.241.014.244.012.247.011.25.008.254.005.257.004.26.001.26-.001.257-.004.254-.005.25-.008.247-.011.244-.012.241-.014.237-.016.233-.018.231-.021.226-.022.224-.023.22-.026.216-.027.212-.028.21-.031.205-.032.202-.033.198-.034.194-.036.191-.038.187-.038.183-.04.179-.041.175-.042.172-.043.168-.043.163-.045.16-.046.155-.046.152-.048.148-.048.143-.048.139-.049.136-.05.131-.05.126-.051.123-.051.118-.051.114-.052.11-.052.106-.052.101-.052.096-.052.092-.052.088-.052.083-.052.079-.052.074-.051.07-.052.065-.051.06-.05.056-.05.051-.05.023-.025.023-.024.021-.024.02-.025.019-.024.018-.024.017-.023.015-.024.014-.023.013-.023.012-.023.01-.023.01-.022.008-.022.006-.023.006-.021.004-.022.004-.021.001-.021.001-.021-.001-.021-.001-.021-.004-.021-.004-.022-.006-.021-.006-.023-.008-.022-.01-.022-.01-.023-.012-.023-.013-.023-.014-.023-.015-.024-.017-.023-.018-.024-.019-.024-.02-.025-.021-.024-.023-.024-.023-.025-.051-.05-.056-.05-.06-.05-.065-.051-.07-.052-.074-.051-.079-.052-.083-.052-.088-.052-.092-.052-.096-.052-.101-.052-.106-.052-.11-.052-.114-.052-.118-.051-.123-.051-.126-.051-.131-.05-.136-.05-.139-.049-.143-.048-.148-.048-.152-.048-.155-.046-.16-.046-.163-.045-.168-.043-.172-.043-.175-.042-.179-.041-.183-.04-.187-.038-.191-.038-.194-.036-.198-.034-.202-.033-.205-.032-.21-.031-.212-.028-.216-.027-.22-.026-.224-.023-.226-.022-.231-.021-.233-.018-.237-.016-.241-.014-.244-.012-.247-.011-.25-.008-.254-.005-.257-.004-.26-.001-.26.001z"/></symbol></defs><defs><symbol id="mmd-service-clock" width="24" height="24"><path transform="scale(.5)" d="M12 2c5.514 0 10 4.486 10 10s-4.486 10-10 10-10-4.486-10-10 4.486-10 10-10zm0-2c-6.627 0-12 5.373-12 12s5.373 12 12 12 12-5.373 12-12-5.373-12-12-12zm5.848 12.459c.202.038.202.333.001.372-1.907.361-6.045 1.111-6.547 1.111-.719 0-1.301-.582-1.301-1.301 0-.512.77-5.447 1.125-7.445.034-.192.312-.181.343.014l.985 6.238 5.394 1.011z"/></symbol></defs><defs><marker id="mmd-service-arrowhead" refX="7.9" refY="5" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" orient="auto-start-reverse"><path d="M -1 0 L 10 5 L 0 10 z"/></marker></defs><defs><marker id="mmd-service-crosshead" markerWidth="15" markerHeight="8" orient="auto" refX="4" refY="4.5"><path fill="none" stroke="#000000" stroke-width="1pt" d="M 1,2 L 6,7 M 6,2 L 1,7" style="stroke-dasharray: 0, 0;"/></marker></defs><defs><marker id="mmd-service-filled-head" refX="15.5" refY="7" markerWidth="20" markerHeight="28" orient="auto"><path d="M 18,7 L9,13 L14,7 L9,1 Z"/></marker></defs><defs><marker id="mmd-service-sequencenumber" refX="15" refY="15" markerWidth="60" markerHeight="40" orient="auto"><circle cx="15" cy="15" r="6"/></marker></defs><defs><marker id="mmd-service-solidTopArrowHead" refX="7.9" refY="7.25" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" orient="auto-start-reverse"><path d="M 0 0 L 10 8 L 0 8 z"/></marker></defs><defs><marker id="mmd-service-solidBottomArrowHead" refX="7.9" refY="0.75" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" orient="auto-start-reverse"><path d="M 0 0 L 10 0 L 0 8 z"/></marker></defs><defs><marker id="mmd-service-stickTopArrowHead" refX="7.5" refY="7" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" orient="auto-start-reverse"><path d="M 0 0 L 7 7" stroke="black" stroke-width="1.5" fill="none"/></marker></defs><defs><marker id="mmd-service-stickBottomArrowHead" refX="7.5" refY="0" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" orient="auto-start-reverse"><path d="M 0 7 L 7 0" stroke="black" stroke-width="1.5" fill="none"/></marker></defs><g data-et="note" data-id="i3"><rect x="386.5" y="213" fill="#EDF2AE" stroke="#666" width="199" height="37" class="note"/><text x="486" y="218" text-anchor="middle" dominant-baseline="middle" alignment-baseline="middle" class="noteText" dy="1em" style="font-size: 16px; font-weight: 400;"><tspan x="486">evict LRU over byte budget</tspan></text></g><g data-et="note" data-id="i7"><rect x="583" y="398" fill="#EDF2AE" stroke="#666" width="166" height="37" class="note"/><text x="666" y="403" text-anchor="middle" dominant-baseline="middle" alignment-baseline="middle" class="noteText" dy="1em" style="font-size: 16px; font-weight: 400;"><tspan x="666">merge queued requests</tspan></text></g><text x="189" y="80" text-anchor="middle" dominant-baseline="middle" alignment-baseline="middle" class="messageText" dy="1em" style="font-size: 16px; font-weight: 400;">POST /v1/contexts</text><line x1="76" y1="111" x2="302" y2="111" class="messageLine0" data-et="message" data-id="i0" data-from="C" data-to="API" stroke-width="2" stroke="none" marker-end="url(#mmd-service-arrowhead)" style="fill: none;"/><text x="395" y="126" text-anchor="middle" dominant-baseline="middle" alignment-baseline="middle" class="messageText" dy="1em" style="font-size: 16px; font-weight: 400;">register()</text><line x1="307" y1="157" x2="482" y2="157" class="messageLine0" data-et="message" data-id="i1" data-from="API" data-to="E" stroke-width="2" stroke="none" marker-end="url(#mmd-service-arrowhead)" style="fill: none;"/><text x="665" y="172" text-anchor="middle" dominant-baseline="middle" alignment-baseline="middle" class="messageText" dy="1em" style="font-size: 16px; font-weight: 400;">fit, encode once, warm up</text><line x1="487" y1="203" x2="842" y2="203" class="messageLine0" data-et="message" data-id="i2" data-from="E" data-to="X" stroke-width="2" stroke="none" marker-end="url(#mmd-service-arrowhead)" style="fill: none;"/><text x="192" y="265" text-anchor="middle" dominant-baseline="middle" alignment-baseline="middle" class="messageText" dy="1em" style="font-size: 16px; font-weight: 400;">context id</text><line x1="305" y1="296" x2="79" y2="296" class="messageLine1" data-et="message" data-id="i4" data-from="API" data-to="C" stroke-width="2" stroke="none" marker-end="url(#mmd-service-arrowhead)" style="stroke-dasharray: 3, 3; fill: none;"/><text x="189" y="311" text-anchor="middle" dominant-baseline="middle" alignment-baseline="middle" class="messageText" dy="1em" style="font-size: 16px; font-weight: 400;">POST /v2/models/{id}/infer</text><line x1="76" y1="342" x2="302" y2="342" class="messageLine0" data-et="message" data-id="i5" data-from="C" data-to="API" stroke-width="2" stroke="none" marker-end="url(#mmd-service-arrowhead)" style="fill: none;"/><text x="485" y="357" text-anchor="middle" dominant-baseline="middle" alignment-baseline="middle" class="messageText" dy="1em" style="font-size: 16px; font-weight: 400;">submit(rows)</text><line x1="307" y1="388" x2="662" y2="388" class="messageLine0" data-et="message" data-id="i6" data-from="API" data-to="B" stroke-width="2" stroke="none" marker-end="url(#mmd-service-arrowhead)" style="fill: none;"/><text x="755" y="450" text-anchor="middle" dominant-baseline="middle" alignment-baseline="middle" class="messageText" dy="1em" style="font-size: 16px; font-weight: 400;">one cached forward</text><line x1="667" y1="481" x2="842" y2="481" class="messageLine0" data-et="message" data-id="i8" data-from="B" data-to="X" stroke-width="2" stroke="none" marker-end="url(#mmd-service-arrowhead)" style="fill: none;"/><text x="488" y="496" text-anchor="middle" dominant-baseline="middle" alignment-baseline="middle" class="messageText" dy="1em" style="font-size: 16px; font-weight: 400;">split per request</text><line x1="665" y1="527" x2="310" y2="527" class="messageLine1" data-et="message" data-id="i9" data-from="B" data-to="API" stroke-width="2" stroke="none" marker-end="url(#mmd-service-arrowhead)" style="stroke-dasharray: 3, 3; fill: none;"/><text x="192" y="542" text-anchor="middle" dominant-baseline="middle" alignment-baseline="middle" class="messageText" dy="1em" style="font-size: 16px; font-weight: 400;">probabilities</text><line x1="305" y1="573" x2="79" y2="573" class="messageLine1" data-et="message" data-id="i10" data-from="API" data-to="C" stroke-width="2" stroke="none" marker-end="url(#mmd-service-arrowhead)" style="stroke-dasharray: 3, 3; fill: none;"/></svg></div>
+        <p class="small" style="margin:0;text-align:center;"><b>Weights + table = the model:</b> <code class="inline">POST /v1/contexts</code> returns an id that predictions reference.
+        <b>LRU bounded by cache bytes</b>, not a count. <b>One executor thread</b> per process, so contexts never contend on the device.
+        <b>Two APIs, one engine:</b> native JSON and Open Inference Protocol v2, which Triton and KServe also speak.</p>
+      </div>
+    </section>
+
+    <!-- 38: DYNAMIC BATCHER -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Serving · FastAPI service</div>
+      <h2>The batcher merges whatever queued while the GPU was busy</h2>
+      <div class="body">
+        <div class="tag tag-existing" style="align-self:flex-start;">src/ltm_serve/service/engine.py · DynamicBatcher._run()</div>
+        <pre class="code small" style="margin:0;font-size:12px;line-height:1.42;" data-src="src/ltm_serve/service/engine.py:106-122" data-sha256="dbe4ff41920a">…
+    batch = [first]
+    n_rows = len(first.rows)
+    deadline = first.enqueued + self.max_delay_s
+    while n_rows &lt; self.max_rows:
+        timeout = deadline - time.perf_counter()
+        try:
+            if timeout &lt;= 0:
+                item = self.queue.get_nowait()
+            else:
+                item = await asyncio.wait_for(self.queue.get(), timeout)
+        except (asyncio.QueueEmpty, TimeoutError):
+            break
+        if n_rows + len(item.rows) &gt; self.max_rows:
+…
+            self._carry = item
+            break</pre>
+        <div class="cols-3"><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>No deliberate wait by default.</b> With <code class="inline">LTM_MAX_DELAY_MS=0</code> it still merges everything that queued during the previous batch: the throughput win is free, the latency cost is opt-in.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Capped at <code class="inline">LTM_MAX_BATCH_ROWS</code></b> so batches stay inside warmed-up shape buckets; a request that doesn't fit carries over to the next batch.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Metrics:</b> request latency, queue wait, per-batch inference time, batch size in rows and requests, in-flight requests (the autoscaling signal), cache bytes.</p></div></div>
+      </div>
+    </section>
+
+    <!-- 39: PRIMER OPEN VS CLOSED LOOP -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Primer · load generation</div>
+      <h2>A closed-loop load test politely stops sending when the server stalls</h2>
+      <div class="body">
+<div class="lane"><div class="lane-label critical">Closed loop</div><div class="lane-track"><span class="small" style="flex:1;">N workers, each: send a request → <b>wait for the reply</b> → send the next. If the server stalls, the client stops sending.</span></div></div><div class="lane"><div class="lane-label parallel">Open loop</div><div class="lane-track"><span class="small" style="flex:1;">A clock sends requests at the offered rate (random, Poisson gaps) <b>whether or not replies have come back</b>, like independent users do.</span></div></div><div class="card" style="padding:14px 18px;"><h3 style="font-size:17px;">Illustration: a 1-second freeze at 160 req/s</h3><p class="small" style="margin:0;">A closed loop with 4 workers sends nothing during the freeze, so only its 4 in-flight requests record the delay. An open loop keeps sending, so ~160 requests arrive into the freeze and each records the wait a real user would have had. The p99 differs enormously.</p></div>
+<div class="cols-2"><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Coordinated omission</b> (Gil Tene's term): the client coordinates with the server and omits exactly the slow samples that matter. Open-loop tools measure from the <i>scheduled</i> send time to avoid it.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Open loop has its own trap:</b> the client must keep to its own schedule. If it can't send fast enough, its backlog is recorded as server latency. That happened twice in this project (two slides on).</p></div></div>
+<div class="card tint-accent" style="padding:10px 16px;"><p class="small" style="margin:0;"><b>Key idea:</b> a latency number is only as honest as the load generator: open loop, measured from the scheduled time, with a client proven not to be the limit.</p></div>
+      </div>
+    </section>
+
+    <!-- 40: OPEN LOOP LOADGEN -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Serving · load testing</div>
+      <h2>Use an open-loop load generator, or you will hide queueing</h2>
+      <div class="body">
+        <div class="cols-2 fill" style="grid-template-columns:1.25fr 1fr;">
+          <div class="col">
+            <div class="tag tag-existing" style="align-self:flex-start;">src/ltm_serve/loadgen.py · schedule on a Poisson clock</div>
+            <pre class="code small" style="margin:0;" data-src="src/ltm_serve/loadgen.py:112-122" data-sha256="175edbc23050">while next_at - start &lt; spec.duration_s:
+    now = time.perf_counter()
+    if next_at &gt; now:
+        await asyncio.sleep(next_at - now)
+    if inflight &gt;= spec.max_inflight:
+        dropped += 1
+    else:
+        inflight += 1
+        tasks.append(asyncio.create_task(one(next_at, bodies[i % len(bodies)])))
+        i += 1
+    next_at += rng.exponential(1.0 / spec.rate)</pre>
+            <div class="tag tag-existing" style="align-self:flex-start;">latency measured from the scheduled send time</div>
+            <pre class="code small" style="margin:0;" data-src="src/ltm_serve/loadgen.py:92-100" data-sha256="719c6adf028f">async def one(scheduled: float, body: bytes) -&gt; None:
+…
+        resp = await client.post(path, content=body, headers=headers)
+        done = time.perf_counter()
+…
+        latencies.append(done - scheduled)</pre>
+          </div>
+          <div class="col">
+            <div class="card tint-warn" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Closed loop hides the problem.</b> With N workers each waiting for a reply, the client slows down exactly when the server does, so queueing delay never shows up (<i>coordinated omission</i>).</p></div>
+            <div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Open loop:</b> requests go out at the offered rate regardless of replies, and each latency starts at <code class="inline">next_at</code>, the time it <i>should</i> have been sent.</p></div>
+            <div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Make the client cheap:</b> request bodies are pre-serialised, and the load runs across processes with <code class="inline">--procs</code>, each an independent Poisson stream.</p></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 41: THE_CLIENT_WAS_THE_BOTTLENECK_FIRST -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Serving · load testing</div>
+      <h2>The client was the bottleneck first</h2>
+      <div class="body" style="gap:10px;">
+        <div class="img-wrap"><img src="../figures/load_gke_client_bottleneck.png" alt="Log-log plots: latency and completed requests per second vs offered load for a 1-process, a 3-process and a 4–6-process client against the same Triton deployment on GKE"></div>
+        <div class="cols-3"><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Symptom:</b> with one client process, Triton looked like it collapsed at 160 req/s: 43 req/s completed, p50 4.9 s. (The blue 1-process curve is plotted up to 80 req/s.)</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>But the server disagreed:</b> Triton's own metrics showed an empty queue and a GPU at 30% utilisation.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Fix, twice:</b> pre-serialised bodies and 3 processes (orange) held 160 req/s at p50 262 ms, then "collapsed" at 240: still the client. With 4–6 processes (green) the same server held 400 req/s.</p></div></div>
+        <div class="card tint-accent" style="padding:10px 16px;"><p class="small" style="margin:0;"><b>Key idea:</b> always check the server's own queue and utilisation before believing a load test's saturation point. The second collapse made it into the first write-up as a Triton result; an independent re-run caught it.</p></div>
+      </div>
+    </section>
+
+    <!-- 42: PRIMER INFERENCE SERVER -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Primer · inference servers</div>
+      <h2>An inference server owns everything around the forward pass</h2>
+      <div class="body" style="gap:10px;">
+<div class="cols-3" style="gap:10px;"><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Model repository and backend:</b> a directory per model with a <code class="inline">config.pbtxt</code>. The backend runs it: TensorRT, ONNX Runtime, PyTorch, or Python (used here, so TabFM's own code runs).</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Instances and dynamic batcher:</b> how many copies of the model run and on which devices, plus a queue per model that merges requests before each call.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Front end and operations:</b> HTTP and gRPC in C++ speaking the Open Inference Protocol v2 (which KServe also uses), Prometheus metrics on :8002, and an API to load and unload models.</p></div></div>
+<div class="tag tag-existing" style="align-self:flex-start;">triton_models/…/tabfm/1/model.py · all the Python backend asks you to write</div>
+<pre class="code small" style="margin:0;font-size:12px;line-height:1.45;" data-src="triton_models/model_repository/tabfm/1/model.py:71-86" data-sha256="3e015a2d8e95">def execute(self, requests: list[Any]) -&gt; list[Any]:
+…
+    arrays = [pb_utils.get_input_tensor_by_name(r, &quot;ROWS&quot;).as_numpy() for r in requests]
+    sizes = [a.shape[0] for a in arrays]
+…
+    proba = self.classifier.predict_proba(pd.DataFrame(np.concatenate(arrays), columns=self.columns))
+…
+    for n in sizes:
+        out = pb_utils.Tensor(&quot;PROBABILITIES&quot;, proba[offset : offset + n].astype(self.output_dtype))
+        responses.append(pb_utils.InferenceResponse(output_tensors=[out]))
+        offset += n
+…
+    return responses</pre>
+<div class="card tint-accent" style="padding:10px 16px;"><p class="small" style="margin:0;"><b>Key idea:</b> you write <code class="inline">execute(requests) → responses</code>; the server owns networking, queueing, batching, placement and metrics.</p></div>
+      </div>
+    </section>
+
+    <!-- 43: TRITON -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Serving · Triton Inference Server</div>
+      <h2>Triton turns batching, instances and metrics into configuration</h2>
+      <div class="body">
+        <div class="cols-2 fill" style="grid-template-columns:0.8fr 1.2fr;">
+          <div class="col">
+            <div class="tag tag-existing" style="align-self:flex-start;">triton_models/…/tabfm/config.pbtxt</div>
+            <pre class="code small" style="margin:0;" data-src="triton_models/model_repository/tabfm/config.pbtxt:6-34" data-sha256="2cce571a6102">max_batch_size: 256
+…
+dynamic_batching {
+  max_queue_delay_microseconds: 0
+}
+…
+instance_group [
+  {
+    count: 1
+    kind: KIND_CPU
+  }
+]</pre>
+          </div>
+          <div class="col">
+            <div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Batch dimension = query rows.</b> Dynamic batching merges concurrent requests into one <code class="inline">execute()</code>, exact because rows are independent. <code class="inline">KIND_CPU</code> is swapped to <code class="inline">KIND_GPU</code> at image build time.</p></div>
+            <div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Context as model.</b> The training table is fixed per Triton model and encoded in <code class="inline">initialize()</code>. Different tables become different models, so Triton's lifecycle management doubles as the context registry, with a queue and metrics per context.</p></div>
+            <div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Explicit model control:</b> <code class="inline">POST /v2/repository/models/tabfm/load</code> with a config override changed the instance count from 1 to 2 in <b>22.5 s</b>, with no pod restart or image rebuild.</p></div>
+            <div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Metrics on :8002</b> showed batching directly: up to 80 req/s, 4,767 requests ran in 954 executions (~5 per batch). They also located the bottleneck later.</p></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 44: ON_CPU,_BOTH_STACKS_KEEP_UP_TO_8_REQ/S_O -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Serving · local containers (Apple M4 CPU, fp32)</div>
+      <h2>On CPU, both stacks keep up to 8 req/s only because they batch</h2>
+      <div class="body" style="gap:10px;">
+        <div class="img-wrap"><img src="../figures/load_local_docker_cpu.png" alt="Log-log plots: latency and throughput vs offered load for FastAPI and Triton containers on M4 CPU"></div>
+        <div class="cols-3"><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Setup:</b> plain Docker on the M4, 512 context rows × 4 members, 1-row requests, client through Docker Desktop port forwarding.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Ready in 42.2 s</b> (FastAPI) and <b>51.2 s</b> (Triton): weights 2.1 s / 1.0 s from the exported checkpoint, context encode 35.4 s / 44.8 s. Outputs agree to 7e-7.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Batching kept them afloat:</b> FastAPI ran 1,244 requests in 215 batches, Triton 1,192 in 204 executions. At 16 req/s both are past saturation (Triton dropped 49).</p></div></div>
+        <div class="card tint-accent" style="padding:10px 16px;"><p class="small" style="margin:0;"><b>Key idea:</b> on a slow device, batching is not an optimisation but the only reason the service keeps up at all.</p></div>
+      </div>
+    </section>
+
+    <!-- 45: CHECK SERVING -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Check your understanding · serving and load testing</div>
+      <h2>Answer these before moving on</h2>
+      <div class="body">
+<div class="col" style="gap:12px;"><div class="card" style="padding:14px 18px;"><p style="margin:0 0 8px;font-size:16px;"><b>1. Latency jumps at 240 req/s, but the server's queue is empty and its GPU is 30% busy. What do you do?</b></p><p class="small muted" style="margin:0;">Suspect the client. Pre-serialise request bodies, add client processes, and re-run until the knee stops moving.</p></div><div class="card" style="padding:14px 18px;"><p style="margin:0 0 8px;font-size:16px;"><b>2. How did one eager Triton instance with a ~190 ms forward keep up with 400 req/s?</b></p><p class="small muted" style="margin:0;">Dynamic batching: ~73 requests merged per forward, so throughput ≈ batch size ÷ forward time ≈ 73 ÷ 0.19 s.</p></div><div class="card" style="padding:14px 18px;"><p style="margin:0 0 8px;font-size:16px;"><b>3. Why does a closed-loop benchmark under-report p99 latency?</b></p><p class="small muted" style="margin:0;">Its workers stop sending while they wait, so few requests experience a stall: coordinated omission.</p></div></div>
+<div class="card" style="padding:10px 16px;"><p class="small" style="margin:0;"><b>Try it:</b> start the service with <br><code class="inline">LTM_DEVICE=mps LTM_DEMO_CONTEXT=&quot;demo:n_train=512,n_features=10,n_classes=2,n_estimators=4&quot; uv run uvicorn ltm_serve.service.app:app --port 8080</code><br>then load it with <code class="inline">uv run python -m ltm_serve.loadgen --url http://localhost:8080 --model demo --rates 1,2,4 --duration 30</code>. Add <code class="inline">--procs 2</code> and check the knee doesn't move.</p></div>
+      </div>
+    </section>
+
+    <!-- 46: SECTION KUBERNETES AND GPUS -->
+    <section class="slide section-slide">
+      <div class="num">Section 5 of 6</div>
+      <h1>Kubernetes and GPUs</h1>
+      <p class="subtitle">KServe on kind locally, then GKE with one NVIDIA L4: cold starts, bottlenecks that move, and quota.</p>
+    </section>
+
+    <!-- 47: PRIMER KUBERNETES -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Primer · Kubernetes for GPU inference</div>
+      <h2>A handful of Kubernetes objects decide where a GPU model runs</h2>
+      <div class="body" style="gap:10px;">
+<div class="cols-3" style="gap:10px;"><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Pod:</b> one or more containers scheduled together on a node. The model server runs in one.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Deployment:</b> keeps N identical pods running and replaces them on updates (rolling, or Recreate).</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Service:</b> a stable address that load-balances across the pods that pass their readiness probe.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Node pool:</b> a group of identical VMs. Here <code class="inline">g2-standard-8</code> with one L4, scaling from 0 to 2 nodes.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Taints and tolerations:</b> GPU nodes repel ordinary pods; only pods that tolerate the taint and request <code class="inline">nvidia.com/gpu</code> land there.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Two autoscalers:</b> the HPA changes the number of pods; the cluster autoscaler adds nodes when pods are Pending.</p></div></div>
+<div class="tag tag-existing" style="align-self:flex-start;">k8s/gke/up.sh · the L4 node pool</div>
+<pre class="code small" style="margin:0;font-size:12.5px;" data-src="k8s/gke/up.sh:40-43" data-sha256="ee74d6406712">  gcloud container node-pools create l4 --project &quot;$PROJECT&quot; --cluster &quot;$CLUSTER&quot; --zone &quot;$ZONE&quot; \
+    --machine-type g2-standard-8 --accelerator type=nvidia-l4,count=1,gpu-driver-version=latest \
+    --enable-autoscaling --num-nodes 0 --min-nodes 0 --max-nodes 2 \
+    --node-taints nvidia.com/gpu=present:NoSchedule --enable-image-streaming</pre>
+<div class="card tint-accent" style="padding:10px 16px;"><p class="small" style="margin:0;"><b>Key idea:</b> pods scale in seconds; GPU nodes scale in minutes, and only as far as your quota allows.</p></div>
+      </div>
+    </section>
+
+    <!-- 48: PRIMER KSERVE AND KEDA -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Primer · KServe and KEDA</div>
+      <h2>KServe turns a model server into one Kubernetes resource; KEDA scales it on any metric</h2>
+      <div class="body" style="gap:10px;">
+<div class="flow"><div class="flow-box accent"><div class="t">InferenceService</div><div class="d">the one resource you write</div></div><div class="flow-arrow">→</div><div class="flow-box"><div class="t">Predictor</div><div class="d">a custom container, or a ServingRuntime such as Triton</div></div><div class="flow-arrow">→</div><div class="flow-box"><div class="t">Storage initializer</div><div class="d">init container: copies storageUri to /mnt/models</div></div><div class="flow-arrow">→</div><div class="flow-box"><div class="t">Model server</div><div class="d">Deployment + Service + probes</div></div><div class="flow-arrow">→</div><div class="flow-box"><div class="t">Autoscaler</div><div class="d">HPA, driven by KEDA</div></div></div>
+<div class="cols-3"><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Standard mode</b> (used here): KServe creates a plain Deployment and Service; no Knative or Istio in the request path.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Weights outside the image:</b> the same image serves any checkpoint in the bucket, and the image stays smaller.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>KEDA</b> runs a Prometheus query and feeds the result to the HPA. Signal: average in-flight requests per pod, target 8.</p></div></div>
+<div class="tag tag-existing" style="align-self:flex-start;">k8s/gke/isvc-fastapi-gpu.yaml · scale on in-flight requests</div>
+<pre class="code small" style="margin:0;font-size:12.5px;" data-src="k8s/gke/isvc-fastapi-gpu.yaml:22-33" data-sha256="7e4cf441925a">autoScaling:
+  metrics:
+    - type: External
+      external:
+        metric:
+          backend: prometheus
+…
+          # Average in-flight requests per ready replica over the last 30 s.
+          query: avg(avg_over_time(ltm_inflight_requests{namespace=&quot;ltm&quot;}[30s]))
+        target:
+          type: Value
+          value: &quot;${TARGET_INFLIGHT}&quot;</pre>
+<div class="card tint-accent" style="padding:10px 16px;"><p class="small" style="margin:0;"><b>Key idea:</b> scale a GPU service on its backlog (in-flight or queued requests), which measures demand directly; CPU usage of a GPU server says little about it.</p></div>
+      </div>
+    </section>
+
+    <!-- 49: TRITON'S_C++_FRONT_END_WINS_THE_TAIL,_EV -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Kubernetes · kind + KServe (local CPU)</div>
+      <h2>Triton's C++ front end wins the tail, even on CPU</h2>
+      <div class="body" style="gap:10px;">
+        <div class="img-wrap"><img src="../figures/load_local_kind_cpu.png" alt="Log-log plots: latency and throughput vs offered load for KServe FastAPI and KServe Triton on kind"></div>
+        <div class="cols-3"><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Setup:</b> KServe v0.20 in Standard mode on kind. Weights on a hostPath PVC (<code class="inline">pvc://</code>, mounted without a copy): apply → Ready in 66 s (FastAPI) and 71 s (Triton), ~56 s of it context encoding.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Both keep up to 8 req/s</b>, but Triton's tail is clearly better: <b>p99 3.8 s vs 6.7 s</b> at 8 req/s.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Why:</b> Triton's HTTP front end is C++; FastAPI parses JSON in the same Python process that runs the model. (Client via <code class="inline">kubectl port-forward</code>; one node hosts everything.)</p></div></div>
+        
+      </div>
+    </section>
+
+    <!-- 50: KSERVE MANIFEST -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Kubernetes · KServe on GKE</div>
+      <h2>Five production gotchas, visible in one manifest</h2>
+      <div class="body" style="gap:12px;">
+        <div class="tag tag-existing" style="align-self:flex-start;">k8s/gke/isvc-fastapi-gpu.yaml (trimmed)</div>
+        <pre class="code small" style="margin:0;" data-src="k8s/gke/isvc-fastapi-gpu.yaml:18-77" data-sha256="9e87d2c6991a">deploymentStrategy:
+  type: Recreate
+…
+    imagePullPolicy: Always # the tag is reused across Cloud Build runs; IfNotPresent would keep a stale image
+…
+      - name: LD_LIBRARY_PATH
+        value: /usr/local/nvidia/lib64
+…
+    startupProbe:
+…
+      failureThreshold: 360 # 30 min: compile warm-up of 9 row buckets alone took ~7 min on an L4
+…
+    resources:
+      requests: { cpu: "3", memory: 20Gi, nvidia.com/gpu: "1" }
+      limits: { cpu: "7", memory: 26Gi, nvidia.com/gpu: "1" } # explicit: KServe otherwise injects cpu: 1</pre>
+        <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:10px;">
+          <div class="card" style="padding:10px 12px;"><p class="small" style="margin:0;font-size:13px;"><b>Recreate:</b> with one GPU, a rolling update surges a new pod that stays Pending forever.</p></div>
+          <div class="card" style="padding:10px 12px;"><p class="small" style="margin:0;font-size:13px;"><b>Pull Always:</b> a reused tag cached on the node would silently run the previous image. Or deploy by digest.</p></div>
+          <div class="card" style="padding:10px 12px;"><p class="small" style="margin:0;font-size:13px;"><b>LD_LIBRARY_PATH:</b> slim images don't point at GKE's driver mount: "Found no NVIDIA driver".</p></div>
+          <div class="card" style="padding:10px 12px;"><p class="small" style="margin:0;font-size:13px;"><b>Startup probe budget:</b> 30 min. The ~7 min comment was the standalone compile; the deployed pod took 23 m 53 s.</p></div>
+          <div class="card" style="padding:10px 12px;"><p class="small" style="margin:0;font-size:13px;"><b>Explicit CPU limit:</b> KServe injects <code class="inline">cpu: 1</code>, rejecting requests of 3 and throttling silently.</p></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 51: PRIMER COLD START -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Primer · cold start</div>
+      <h2>A GPU cold start is a relay race, and the image pull runs the longest leg</h2>
+      <div class="body">
+<p class="small muted" style="margin:0;">Eager Triton InferenceService on GKE, from zero GPU nodes to Ready: <b>7 m 12 s</b>. Box widths are proportional to time (timeline from pod events).</p>
+<div style="display:flex;gap:4px;align-items:stretch;"><div class="flow-box " style="flex:55 1 0;padding:10px 6px;"><div class="t" style="font-size:13px;">New L4 node</div><div class="d">55 s</div></div><div class="flow-box " style="flex:37 1 0;padding:10px 6px;"><div class="t" style="font-size:13px;">GPU plugin</div><div class="d">37 s</div></div><div class="flow-box " style="flex:45 1 0;padding:10px 6px;"><div class="t" style="font-size:13px;">Weights from GCS</div><div class="d">45 s</div></div><div class="flow-box warn" style="flex:211 1 0;padding:10px 6px;"><div class="t" style="font-size:13px;">Image pull, 13.6 GB</div><div class="d">3 m 31 s</div></div><div class="flow-box " style="flex:39 1 0;padding:10px 6px;"><div class="t" style="font-size:13px;">Import</div><div class="d">39 s</div></div><div class="flow-box accent" style="flex:29 1 0;padding:10px 6px;"><div class="t" style="font-size:13px;">GPU load + encode</div><div class="d">29 s</div></div></div>
+<div class="cols-3"><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Shrink the image:</b> slim base images, weights outside the image, image streaming. Dropping unused CUDA wheels cut the pull from 3 m 31 s to 1 m 49 s.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Skip the node:</b> keep <code class="inline">minReplicas ≥ 1</code> on a warm node. A warm restart (node up, image cached) took ~1 min.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Compiled replicas add a leg:</b> 1,221–1,372 s of CUDA-graph capture, unless the compile cache is persisted (206 s when it was reused).</p></div></div>
+<div class="card tint-warn" style="padding:10px 16px;"><p class="small" style="margin:0;"><b>In production:</b> scale-to-zero on GPUs means the first request after idle waits minutes. For a latency SLO, keep warm capacity and plan scale-out minutes ahead.</p></div>
+<div class="card tint-accent" style="padding:10px 16px;"><p class="small" style="margin:0;"><b>Key idea:</b> the model's own work (weights to the GPU and context encoding) took 29 s of the 7 m 12 s; the rest was nodes, downloads, the image and imports.</p></div>
+      </div>
+    </section>
+
+    <!-- 52: COLD START -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Kubernetes · cold start on GKE</div>
+      <h2>Cold start: first the image, then the compiler</h2>
+      <div class="body" style="gap:12px;">
+        <table style="font-size:13.5px;">
+          <tr><th>Variant (apply → Ready)</th><th>Node</th><th>Image pull</th><th>Model init</th><th style="text-align:right;">Total</th></tr>
+          <tr><td>Triton eager, first deploy</td><td>new L4 55 s + GPU plugin 37 s</td><td>13.6 GB, 3 m 31 s</td><td>39 s import + 25 s weights + 4.4 s encode</td><td style="text-align:right;"><b>7 m 12 s</b></td></tr>
+          <tr><td>Triton eager, warm restart</td><td>already up</td><td>cached</td><td>same</td><td style="text-align:right;"><b>~1 min</b></td></tr>
+          <tr><td>Triton eager, slim image</td><td>already up</td><td>12.8 GB, 1 m 49 s</td><td>17 s weights + 2 s encode</td><td style="text-align:right;"><b>3 m 11 s</b></td></tr>
+          <tr><td>FastAPI eager</td><td>already up</td><td>4.7 GB</td><td>20 s weights + 2 s encode</td><td style="text-align:right;"><b>~1 min</b></td></tr>
+          <tr><td>FastAPI compiled, slim image</td><td>already up</td><td>4.0 GB, 2 m 05 s</td><td>21 s weights + 2 s encode + <b>1,221 s capture</b></td><td style="text-align:right;"><b>23 m 53 s</b></td></tr>
+          <tr><td>Triton compiled, 1 instance</td><td>already up</td><td>13.6 GB, 3 m 17 s</td><td>26 s weights + 4.4 s encode + <b>1,372 s capture</b></td><td style="text-align:right;"><b>28 m 11 s</b></td></tr>
+          <tr><td>+ 2nd instance via repository API</td><td>same pod</td><td>–</td><td>206 s (inductor cache on disk reused)</td><td style="text-align:right;"><b>+3 m 26 s</b></td></tr>
+        </table>
+        <div class="cols-3"><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Weights are small by comparison:</b> 3.3 GB from GCS via KServe's storage initializer took 45 s. Weights to GPU plus context encode: under 30 s.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Slim the image:</b> dropping the CUDA 13 wheels a broken filter had kept cut Triton 13.6 → 12.8 GB and the pull 3 m 31 s → 1 m 49 s.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Scale-to-zero on GPUs</b> means paying 1–7 minutes on the first request. Image streaming was on, but a freshly pushed image still pulled in full.</p></div></div>
+        <div class="card tint-accent" style="padding:10px 16px;"><p class="small" style="margin:0;"><b>Key idea:</b> the image dominates an eager cold start and compilation dominates a compiled one; loading weights and encoding the context are small by comparison on a GPU.</p></div>
+      </div>
+    </section>
+
+    <!-- 53: EAGER_TRITON_ONE_INSTANCE_HOLDS_400_REQ_S -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Kubernetes · GPU serving on GKE (eager)</div>
+      <h2>Eager Triton: one instance holds ~400 req/s on one CPU core</h2>
+      <div class="body" style="gap:10px;">
+        <div class="img-wrap"><img src="../figures/load_gke_stacks.png" alt="Log-log plots: latency and throughput vs offered load on one L4 for FastAPI, Triton 1 instance and Triton 2 instances"></div>
+        <div class="cols-3"><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Setup for all GKE runs:</b> 1× L4, 1,024 context rows, 10 features, 8 members, bf16, 1-row OIP v2 requests, open-loop client in-cluster.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Triton, 1 instance: p99 380 ms at 160, 447 ms at 320 req/s, drops start ~400.</b> The pod sits on one core (one Python-backend process, one GIL) with the GPU under-utilised, yet keeps up: the dynamic batcher merges ~21 requests per forward at 240 req/s and ~73 at 400+.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>A 2nd instance on the same GPU added nothing</b> (~300 req/s, p99 1.75 s at 320; that run used a 4-process client). FastAPI reached ~285 req/s via ~25-request batches, with a worse tail: p99 673 vs 380 ms at 160 req/s.</p></div></div>
+        <div class="card tint-accent" style="padding:10px 16px;"><p class="small" style="margin:0;"><b>Key idea:</b> the first version of this slide said "collapses at ~160, 2nd instance doubles capacity". That was a 3-process client. One idle core is not proof of a host bottleneck; a real knee needs a client you have proven is not the limit.</p></div>
+      </div>
+    </section>
+
+    <!-- 54: AFTER_COMPILING,_A_SECOND_INSTANCE_MADE_ -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Kubernetes · GPU serving on GKE (compiled)</div>
+      <h2>After compiling, a second instance made Triton slower</h2>
+      <div class="body" style="gap:10px;">
+        <div class="img-wrap"><img src="../figures/load_gke_triton_compiled.png" alt="Log-log plots: latency and throughput vs offered load for Triton eager 1 instance, compiled 1 instance and compiled 2 instances"></div>
+        <div class="cols-3"><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Compiled, 1 instance:</b> p50 91 / p99 125 ms at 160 req/s, knee <b>~350 req/s</b>. Eager was 273 / 380 ms with a knee of ~400: 3× lower latency at a similar capacity, and p99 138 vs 405 ms at 240 req/s.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>2 instances never helped.</b> Compiled, the GPU is the limit, so they only time-slice it: smaller batches, interleaved CUDA graphs, slower at every load (154 / 218 ms at 160 req/s). Eager, the 2nd instance was slightly slower too.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>The cost:</b> capturing 9 row buckets took 1,372 s in the first instance (28 min to Ready). The 2nd instance took 206 s because inductor's on-disk cache was reused.</p></div></div>
+        <div class="card tint-accent" style="padding:10px 16px;"><p class="small" style="margin:0;"><b>Key idea:</b> instance count per GPU has to be measured, not derived from "one GIL". Here one instance won in both modes, and compilation bought latency rather than throughput. Re-measure after every change.</p></div>
+      </div>
+    </section>
+
+    <!-- 55: COMPILED_FASTAPI_GOT_FASTER,_BUT_ITS_CAP -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Kubernetes · GPU serving on GKE (compiled)</div>
+      <h2>Compiled FastAPI got faster, but its capacity dropped</h2>
+      <div class="body" style="gap:10px;">
+        <div class="img-wrap"><img src="../figures/load_gke_fastapi_compiled.png" alt="Log-log plots: latency and throughput vs offered load for FastAPI eager, FastAPI compiled and Triton compiled"></div>
+        <div class="cols-3"><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Same ~3× latency cut:</b> p50 97 / p99 137 ms at 160 req/s (eager 314 / 673 ms). But the knee <b>fell from ~285 to ~230 req/s</b>.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Why:</b> during overload the pod used 1.05 CPU cores for JSON parsing, the asyncio loop, pandas preprocessing and batch bookkeeping. With ~66 ms GPU batches (37,663 requests in 2,903 batches), host work is the ceiling. Eager's ~190 ms batches hid it.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Compiled Triton (green) reached ~350 req/s</b> on the same GPU: its HTTP/gRPC front end and scheduler are C++, and the Python stub only receives tensors.</p></div></div>
+        <div class="card tint-accent" style="padding:10px 16px;"><p class="small" style="margin:0;"><b>Key idea:</b> at high throughput, keep request handling out of the model's Python process.</p></div>
+      </div>
+    </section>
+
+    <!-- 56: SYNTHESIS BOTTLENECK MOVED -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Synthesis · sections 1 to 5</div>
+      <h2>Each fix moved the bottleneck somewhere new</h2>
+      <div class="body">
+<table style="font-size:13.5px;"><tr><th>Step</th><th>Bottleneck</th><th>Evidence</th><th>What moved it</th></tr><tr><td>Stock model</td><td>re-encoding the table on every request</td><td>latency grows with context rows (slope 1.12)</td><td>exact context cache: 9.47 s → 129 ms</td></tr><tr><td>Cached forward</td><td>Python launching kernels</td><td>flat from 1 to 64 rows; preprocessing only 4–7 ms</td><td>torch.compile + CUDA graphs: 111 → 28 ms</td></tr><tr><td>First load tests</td><td>the load generator</td><td>Triton's queue empty, GPU ~30% busy</td><td>pre-serialised bodies, 4–6 client processes</td></tr><tr><td>Compiled FastAPI</td><td>one Python process (1.05 cores)</td><td>knee fell from ~285 to ~230 req/s</td><td>C++ front end: compiled Triton ~350 req/s</td></tr><tr><td>Compiled Triton</td><td>the GPU</td><td>a 2nd instance was slower at every load</td><td>one instance per GPU; scale with GPUs</td></tr><tr><td>Scale-out</td><td>GPU quota</td><td>“GCE quota exceeded”</td><td>quota and reservations belong in the design</td></tr></table>
+<div class="card tint-accent" style="padding:10px 16px;"><p class="small" style="margin:0;"><b>Key idea:</b> re-measure after every change. The right number of instances and even the right framework changed as the bottleneck moved.</p></div>
+      </div>
+    </section>
+
+    <!-- 57: AUTOSCALING -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Kubernetes · autoscaling with KEDA</div>
+      <h2>The autoscaler worked; GPU quota didn't</h2>
+      <div class="body" style="gap:14px;">
+        <div class="flow">
+          <div class="flow-box"><div class="t">Prometheus</div><div class="d">avg in-flight requests per pod over 30 s</div></div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-box"><div class="t">KEDA</div><div class="d">target 8 in-flight per replica</div></div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-box"><div class="t">HPA</div><div class="d">Deployment 1 → 2</div></div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-box"><div class="t">Pending pod</div><div class="d">needs a 2nd L4</div></div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-box warn"><div class="t">Cluster autoscaler</div><div class="d">"GCE quota exceeded"</div></div>
+        </div>
+        <p class="small muted" style="margin:0;">FastAPI at min 1 / max 2 replicas, constant 240 req/s for 4 minutes.</p>
+        <div class="cols-3">
+          <div class="card"><div class="stat"><span class="num">+28 s</span><span class="lbl">KEDA saw ~33 in-flight requests per pod (target 8) and scaled to 2</span></div></div>
+          <div class="card"><div class="stat"><span class="num">+40 s</span><span class="lbl">2nd pod Pending: "Node scale up … failed: GCE quota exceeded" (GPU quota 1; increase denied)</span></div></div>
+          <div class="card"><div class="stat"><span class="num">57,977</span><span class="lbl">requests served by the single replica at 241 req/s, p50 408 ms, p99 825 ms, 48 dropped</span></div></div>
+        </div>
+        <div class="card tint-accent" style="padding:10px 16px;"><p class="small" style="margin:0;"><b>Key idea:</b> in real GPU serving the binding constraint is often capacity and quota, not the autoscaler config. Reservations, quota and fallback pools are part of inference architecture.</p></div>
+      </div>
+    </section>
+
+    <!-- 58: CHECK KUBERNETES -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Check your understanding · Kubernetes and GPUs</div>
+      <h2>Answer these before moving on</h2>
+      <div class="body">
+<div class="col" style="gap:12px;"><div class="card" style="padding:14px 18px;"><p style="margin:0 0 8px;font-size:16px;"><b>1. A rolling update of a single-GPU InferenceService hangs with a Pending pod. Why, and what is the fix?</b></p><p class="small muted" style="margin:0;">A rolling update starts the new pod before stopping the old one, and the new pod needs a GPU that doesn't exist. Use deploymentStrategy: Recreate.</p></div><div class="card" style="padding:14px 18px;"><p style="margin:0 0 8px;font-size:16px;"><b>2. Cold start from zero nodes took 7 m 12 s. What was the largest part, and what would you change first?</b></p><p class="small muted" style="margin:0;">The 13.6 GB image pull (3 m 31 s). Slim the image, keep weights out of it, and keep a warm node with minReplicas ≥ 1.</p></div><div class="card" style="padding:14px 18px;"><p style="margin:0 0 8px;font-size:16px;"><b>3. Why did a second compiled Triton instance on the same GPU make latency worse?</b></p><p class="small muted" style="margin:0;">Compiled, the GPU was the bottleneck, so two instances only time-sliced it with smaller batches. More instances help only when something else is the limit.</p></div></div>
+<div class="card" style="padding:10px 16px;"><p class="small" style="margin:0;"><b>Try it:</b> <code class="inline">k8s/gke/up.sh</code>, then <code class="inline">k8s/gke/run.sh k8s/gke/isvc-triton-gpu.yaml</code>, then <b><code class="inline">k8s/gke/down.sh</code></b>. This is billed until down.sh finishes (roughly $0.85/h per L4 node, plus the system node and images).</p></div>
+      </div>
+    </section>
+
+    <!-- 59: SECTION LESSONS -->
+    <section class="slide section-slide">
+      <div class="num">Section 6 of 6</div>
+      <h1>Lessons</h1>
+      <p class="subtitle">The decision doc you'd bring to a design review, a capacity model, everything that went wrong, and a glossary and reading list for reference.</p>
+    </section>
+
+    <!-- 60: PRINCIPLES -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Lessons · inference architecture</div>
+      <h2>Eight principles for serving a model like this</h2>
+      <div class="body">
+        <div class="cols-2" style="gap:12px;">
+          <div class="card" style="padding:11px 16px;"><p class="small" style="margin:0;"><b>1. Separate context and weights.</b> Weights are shared and immutable; contexts are per-tenant and memory-heavy. Byte budget, LRU, route by context id.</p></div>
+          <div class="card" style="padding:11px 16px;"><p class="small" style="margin:0;"><b>2. Encode once, serve many.</b> Make context registration explicit and asynchronous; requests never re-encode. Worth 2–74× depending on context size.</p></div>
+          <div class="card" style="padding:11px 16px;"><p class="small" style="margin:0;"><b>3. Choose ensemble size from measured quality</b>, and batch all members in one forward.</p></div>
+          <div class="card" style="padding:11px 16px;"><p class="small" style="margin:0;"><b>4. Remove Python from the hot path, in order:</b> compile with shape buckets and warm-up (4×); HTTP/JSON out of the model process; more instances only if measured (here they never paid off).</p></div>
+          <div class="card" style="padding:11px 16px;"><p class="small" style="margin:0;"><b>5. Batch by default.</b> Measure <code class="inline">max_queue_delay</code> rather than guess it: at 0 ms, merging under load already gave 5–25 requests per batch.</p></div>
+          <div class="card" style="padding:11px 16px;"><p class="small" style="margin:0;"><b>6. Pick the runtime per constraint:</b> Triton for tail latency per GPU; KServe for Kubernetes lifecycle, storage and autoscaling; FastAPI for iteration speed and custom APIs.</p></div>
+          <div class="card" style="padding:11px 16px;"><p class="small" style="margin:0;"><b>7. Plan cold starts and capacity explicitly.</b> <code class="inline">minReplicas ≥ 1</code> for latency SLOs, slim images, weights outside the image, quota and reservations.</p></div>
+          <div class="card" style="padding:11px 16px;"><p class="small" style="margin:0;"><b>8. Build a capacity model from measurements</b>, and re-measure after every optimisation, because the bottleneck moves (next slide).</p></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 61: CAPACITY MODEL -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Lessons · capacity model</div>
+      <h2>1,000 req/s at p99 &lt; 150 ms needs 5 + 1 L4s</h2>
+      <div class="body" style="gap:14px;">
+        <p class="small muted" style="margin:0;">Assumptions: 1,024 context rows, 10 features, 8 members, 1-row requests, bf16, one L4, compiled Triton with 1 instance. Arithmetic: 1,000 ÷ 240 ≈ 4.2, so 5 GPUs, plus 1 so the fleet survives losing one (N+1).</p>
+        <div class="cols-3">
+          <div class="card"><div class="stat"><span class="num">~240 req/s</span><span class="lbl">per GPU at p99 &lt; 150 ms (137 ms measured at 240 req/s; 315 ms at 320)</span></div></div>
+          <div class="card"><div class="stat"><span class="num">8–10</span><span class="lbl">contexts per 24 GB L4: each caches 1,024 × 8 × ~198 KB ≈ 1.6 GB, after 3.3 GB weights and CUDA graphs</span></div></div>
+          <div class="card"><div class="stat"><span class="num">~$5/h</span><span class="lbl">for the 6-GPU fleet at roughly $0.85/h per on-demand g2-standard-8 in us-central1 (check current pricing)</span></div></div>
+        </div>
+        <div class="cols-3"><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Optimisation made the SLO reachable at all.</b> No eager configuration meets it at any fleet size (p99 ≥ 360 ms even at 80 req/s); stock TabFM without the cache takes ~860 ms per request here.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Many tenants hit memory first.</b> The context byte budget, not QPS, is the first limit: shard contexts across replicas and route by context id.</p></div><div class="card" style="padding:12px 16px;"><p class="small" style="margin:0;"><b>Scale-out is slow:</b> 3–7 min eager (image-dominated), 28 min compiled without a persisted compile cache. Keep <code class="inline">minReplicas</code> at peak minus burst.</p></div></div>
+      </div>
+    </section>
+
+    <!-- 62: WHAT WENT WRONG 1 -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Lessons · everything that went wrong (1 of 2)</div>
+      <h2>What went wrong, part 1: measurement and the model</h2>
+      <div class="body">
+        <table style="font-size:13.5px;">
+          <tr><th style="width:22%;">Problem</th><th style="width:36%;">Symptom</th><th>Fix / lesson</th></tr>
+          <tr><td><b>Another process on the laptop</b></td><td>Mac sweeps 2–7× slower; cached 1-row 879 ms instead of 128 ms</td><td>Check what else is running; keep contended results separate; re-run</td></tr>
+          <tr><td><b>Load-generator bottleneck, twice</b></td><td>"Saturation" at 160 req/s (1 client process), then a "collapse" at 240 (3 processes), Triton's queue empty, GPU ~30%</td><td>Pre-serialised bodies, 4–6 client processes; read the server's queue and utilisation. The 2nd one reached the write-up before a re-run caught it</td></tr>
+          <tr><td><b>Synthetic task too easy</b></td><td>Accuracy flat at 97% for every ensemble size</td><td>Harder task (<code class="inline">class_sep=0.5</code>) plus log loss; still flat, a real finding</td></tr>
+          <tr><td><b>Library default <code class="inline">batch_size=1</code></b></td><td>Ensemble members run one by one</td><td>Batch all members: 5× on the L4</td></tr>
+          <tr><td><b>bf16 on ARM CPU</b></td><td>5–11× slower than fp32</td><td>Choose precision per target</td></tr>
+          <tr><td><b>Triton Python backend GIL</b></td><td>GPU ~30% utilised, pod at 1 core</td><td>Not the limit at ≤400 req/s (batches grow to ~70 requests); compile to cut dispatch 3×; a 2nd instance never helped</td></tr>
+          <tr><td><b>Compile warm-up</b></td><td>433 s to compile 9 shape buckets in a fresh process</td><td>Budget it in startup probes; persist the inductor cache</td></tr>
+          <tr><td><b><code class="inline">triton/</code> dir in repo root</b></td><td><code class="inline">import triton</code> picked up the directory and broke <code class="inline">torch._dynamo</code></td><td>Renamed to <code class="inline">triton_models/</code>: nothing in the repo root may shadow a real package</td></tr>
+        </table>
+      </div>
+    </section>
+
+    <!-- 63: WHAT WENT WRONG 2 -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Lessons · everything that went wrong (2 of 2)</div>
+      <h2>What went wrong, part 2: small container and Kubernetes configs, big consequences</h2>
+      <div class="body">
+        <table style="font-size:13px;">
+          <tr><th style="width:22%;">Problem</th><th style="width:38%;">Symptom</th><th>Fix / lesson</th></tr>
+          <tr><td><b>CUDA 13 wheels in every image</b></td><td>Filter regex required <code class="inline">==</code> right after <code class="inline">nvidia-</code>; CPU image 7.86 GB</td><td>Fixed <code class="inline">docker/requirements.sh</code>: CPU 1.85 GB; GPU service 4.7 → 4.0 GB</td></tr>
+          <tr><td><b>No C compiler for torch.compile</b></td><td><code class="inline">InductorError: Failed to find C compiler</code></td><td>Install <code class="inline">gcc</code> in CUDA service images</td></tr>
+          <tr><td><b>GPU driver not found</b></td><td><code class="inline">RuntimeError: Found no NVIDIA driver</code> in <code class="inline">python:3.12-slim</code></td><td><code class="inline">LD_LIBRARY_PATH=/usr/local/nvidia/lib64</code></td></tr>
+          <tr><td><b>KServe default CPU limit</b></td><td><code class="inline">requests.cpu: 3 must be ≤ cpu limit of 1</code></td><td>Always set <code class="inline">limits.cpu</code> (else silent throttling)</td></tr>
+          <tr><td><b>Rolling update, one GPU</b></td><td>New pod Pending forever; "GCE quota exceeded"</td><td><code class="inline">deploymentStrategy: Recreate</code></td></tr>
+          <tr><td><b>Reused image tag</b></td><td>A redeploy would have run the previous, node-cached image</td><td><code class="inline">imagePullPolicy: Always</code>, or deploy by digest</td></tr>
+          <tr><td><b>Bare Pods for bench jobs</b></td><td>L4 node could not scale to zero while an idle bench pod existed</td><td><code class="inline">safe-to-evict: "true"</code> or Jobs; delete once results are copied</td></tr>
+          <tr><td><b>Prometheus crash loop</b></td><td><code class="inline">global scrape timeout greater than scrape interval</code></td><td>Set <code class="inline">scrape_timeout</code> below a short <code class="inline">scrape_interval</code></td></tr>
+          <tr><td><b>kind rewrites current-context</b></td><td>Kubeconfig switched from the GKE context to <code class="inline">kind-ltm</code></td><td>Every script passes <code class="inline">--context</code> explicitly</td></tr>
+          <tr><td><b>GPU quota increase denied</b></td><td>No real 1 → 2 GPU scale-out</td><td>Documented the autoscaling chain up to the quota failure</td></tr>
+        </table>
+      </div>
+    </section>
+
+    <!-- 64: GLOSSARY 1 -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Reference · glossary (1 of 2)</div>
+      <h2>Glossary: bucket to instance</h2>
+      <div class="body">
+<div class="cols-2" style="gap:24px;"><div><table style="font-size:13.5px;"><tr><th>Term</th><th>Meaning here</th></tr><tr><td><b>Bucket</b></td><td>one of a few fixed input shapes a batch is padded to, so compiled graphs are reused</td></tr><tr><td><b>Cold start</b></td><td>time from asking for a replica to it serving: node, image, weights, warm-up</td></tr><tr><td><b>Context</b></td><td>the labelled training table TabFM reads at prediction time</td></tr><tr><td><b>Context cache</b></td><td>the training rows' K, V and inducing-point states, computed once per context</td></tr><tr><td><b>Coordinated omission</b></td><td>a load test's bias when the client slows down with the server and skips slow samples</td></tr><tr><td><b>CUDA graph</b></td><td>a recorded sequence of GPU kernels, replayed with one launch; fixed shapes and memory</td></tr></table></div><div><table style="font-size:13.5px;"><tr><th>Term</th><th>Meaning here</th></tr><tr><td><b>Dispatch overhead</b></td><td>CPU time Python and PyTorch spend choosing and launching each kernel</td></tr><tr><td><b>Dynamic batching</b></td><td>merging requests that queued while the model was busy into the next forward</td></tr><tr><td><b>Eager mode</b></td><td>PyTorch's default: run each op as Python reaches it, one kernel launch per op</td></tr><tr><td><b>Ensemble member</b></td><td>one of TabFM's views of the table (shuffles, shifts); predictions are averaged</td></tr><tr><td><b>In-flight requests</b></td><td>requests received but not yet answered; the autoscaling signal here</td></tr><tr><td><b>Instance (Triton)</b></td><td>one copy of a model inside the server, with its own process and memory</td></tr></table></div></div>
+      </div>
+    </section>
+
+    <!-- 65: GLOSSARY 2 -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Reference · glossary (2 of 2)</div>
+      <h2>Glossary: knee to warm-up</h2>
+      <div class="body">
+<div class="cols-2" style="gap:24px;"><div><table style="font-size:13.5px;"><tr><th>Term</th><th>Meaning here</th></tr><tr><td><b>Knee</b></td><td>the first offered load where requests drop or achieved falls below offered</td></tr><tr><td><b>Noise floor</b></td><td>how much a model's outputs change on their own, e.g. with batch composition</td></tr><tr><td><b>Offered / achieved load</b></td><td>the rate clients send / the rate that completes</td></tr><tr><td><b>Open / closed loop</b></td><td>requests sent on a clock / sent only after the previous reply</td></tr><tr><td><b>OIP v2</b></td><td>Open Inference Protocol: the tensor API Triton, KServe and this service all speak</td></tr><tr><td><b>p50 / p99</b></td><td>latency that 50% / 99% of requests beat</td></tr></table></div><div><table style="font-size:13.5px;"><tr><th>Term</th><th>Meaning here</th></tr><tr><td><b>Python backend</b></td><td>a Triton backend that calls your execute() for each batch</td></tr><tr><td><b>Quota</b></td><td>a cloud project's cap on resources such as GPUs; here 1 L4</td></tr><tr><td><b>Readiness / startup probe</b></td><td>Kubernetes checks that gate traffic and give slow starts time</td></tr><tr><td><b>SLO</b></td><td>a promised target, such as p99 &lt; 150 ms</td></tr><tr><td><b>Storage initializer</b></td><td>KServe's init container that downloads a model's weights before the server starts</td></tr><tr><td><b>Warm-up</b></td><td>running every bucket once before reporting ready, so no user pays for compilation</td></tr></table></div></div>
+      </div>
+    </section>
+
+    <!-- 66: FURTHER READING -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Reference · further reading</div>
+      <h2>Where to go next</h2>
+      <div class="body">
+<div class="cols-2" style="gap:14px;"><div class="card" style="padding:12px 16px;"><h3 style="font-size:16px;">Measuring latency</h3><ul class="small" style="margin:0;padding-left:18px;"><li style="margin-bottom:5px;font-size:14px;"><a href="https://research.google/pubs/the-tail-at-scale/" style="color:var(--accent2);">Dean and Barroso, <i>The Tail at Scale</i></a>: why p99 dominates at scale</li><li style="margin-bottom:5px;font-size:14px;"><a href="https://github.com/giltene/wrk2" style="color:var(--accent2);">wrk2 README (Gil Tene)</a>: open-loop load and coordinated omission</li></ul></div><div class="card" style="padding:12px 16px;"><h3 style="font-size:16px;">GPU performance</h3><ul class="small" style="margin:0;padding-left:18px;"><li style="margin-bottom:5px;font-size:14px;"><a href="https://horace.io/brrr_intro.html" style="color:var(--accent2);">Horace He, <i>Making Deep Learning Go Brrrr</i></a>: compute, memory and overhead</li><li style="margin-bottom:5px;font-size:14px;"><a href="https://docs.pytorch.org/docs/stable/notes/cuda.html" style="color:var(--accent2);">PyTorch CUDA semantics</a>: asynchronous execution, CUDA graphs</li><li style="margin-bottom:5px;font-size:14px;"><a href="https://docs.pytorch.org/tutorials/intermediate/torch_compile_tutorial.html" style="color:var(--accent2);">torch.compile tutorial</a> · <a href="https://pytorch.org/blog/accelerating-pytorch-with-cuda-graphs/" style="color:var(--accent2);">Accelerating PyTorch with CUDA graphs</a></li></ul></div><div class="card" style="padding:12px 16px;"><h3 style="font-size:16px;">Serving</h3><ul class="small" style="margin:0;padding-left:18px;"><li style="margin-bottom:5px;font-size:14px;"><a href="https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/user_guide/batcher.html" style="color:var(--accent2);">Triton batchers</a> · <a href="https://github.com/triton-inference-server/python_backend" style="color:var(--accent2);">Triton Python backend</a></li><li style="margin-bottom:5px;font-size:14px;"><a href="https://kserve.github.io/website/" style="color:var(--accent2);">KServe documentation</a> · <a href="https://keda.sh/docs/latest/concepts/" style="color:var(--accent2);">KEDA concepts</a></li><li style="margin-bottom:5px;font-size:14px;"><a href="https://www.anyscale.com/blog/continuous-batching-llm-inference" style="color:var(--accent2);">Continuous batching for LLM inference</a>: the token-level variant</li></ul></div><div class="card" style="padding:12px 16px;"><h3 style="font-size:16px;">This project and the series</h3><ul class="small" style="margin:0;padding-left:18px;"><li style="margin-bottom:5px;font-size:14px;"><a href="https://github.com/google-research/tabfm" style="color:var(--accent2);">google-research/tabfm</a>: the model</li><li style="margin-bottom:5px;font-size:14px;"><a href="https://github.com/glukicov/ltm" style="color:var(--accent2);">glukicov/ltm</a> (part 1) · <a href="https://github.com/glukicov/ltm_ft" style="color:var(--accent2);">glukicov/ltm_ft</a> (part 2)</li><li style="margin-bottom:5px;font-size:14px;"><a href="https://github.com/glukicov/ltm_serve" style="color:var(--accent2);">glukicov/ltm_serve</a>: <code class="inline">docs/WRITEUP.md</code> has every number in this deck</li><li style="margin-bottom:5px;font-size:14px;"><a href="https://github.com/glukicov/slideops" style="color:var(--accent2);">SlideOps</a>: how these slides were built and checked against the code</li></ul></div></div>
+      </div>
+    </section>
+
+    <!-- 67: CLOSING -->
+    <section class="slide" style="padding-bottom:88px;">
+      <div class="kicker">Closing</div>
+      <h2>Start here, and reproduce every number</h2>
+      <div class="body" style="gap:12px;">
+        <div class="cols-2">
+          <div class="col" style="gap:6px;">
+            <h3>Read</h3>
+            <ul class="small" style="padding-left:18px;margin:0;">
+              <li><code class="inline">docs/WRITEUP.md</code>: every phase, number and decision</li>
+              <li><code class="inline">docs/local_phase.md</code>: the CPU, Docker and kind + KServe phase</li>
+              <li><code class="inline">src/ltm_serve/context_cache.py</code>: the exact KV cache</li>
+              <li><code class="inline">src/ltm_serve/service/engine.py</code>: context registry and batcher</li>
+            </ul>
+          </div>
+          <div class="col" style="gap:6px;">
+            <h3>Open items <span class="muted small">(not done in this project)</span></h3>
+            <ul class="list-todo small" style="margin:0;">
+              <li>A TensorRT/ONNX path for the core forward behind Triton</li>
+              <li>A persisted compile cache so compiled replicas can autoscale</li>
+              <li>A real 1 → 2 GPU scale-out (the quota increase was denied)</li>
+            </ul>
+          </div>
+        </div>
+        <div class="tag tag-existing" style="align-self:flex-start;">docs/WRITEUP.md · Reproduce (trimmed)</div>
+        <pre class="code small" style="margin:0;" data-src="docs/WRITEUP.md:543-554" data-sha256="3db27b93f32e">uv sync --all-extras
+uv run ltm-serve bench context_scaling stages --device mps      # or --device cuda
+uv run ltm-serve plots
+…
+k8s/gke/up.sh                                                   # cluster, KServe, KEDA, Prometheus, Cloud Build
+k8s/gke/run.sh k8s/gke/isvc-triton-gpu.yaml
+k8s/gke/down.sh                                                 # delete everything billable</pre>
+        <div class="card tint-accent" style="text-align:center;padding:10px;"><h3 style="margin:0;font-size:17px;">github.com/glukicov/ltm_serve · part 3 of a series with glukicov/ltm and glukicov/ltm_ft · slides made with SlideOps</h3></div>
+      </div>
+    </section>
+
+    <!-- SLIDES END -->
+  </div>
+</div>
+
+<div class="hud">
+  <button class="nav-btn" id="prevBtn" aria-label="Previous slide">◂</button>
+  <div class="counter"><span id="counterCur">1</span> / <span id="counterTotal">1</span></div>
+  <button class="nav-btn" id="nextBtn" aria-label="Next slide">▸</button>
+</div>
+
+<script>
+(function(){
+  var slides = Array.prototype.slice.call(document.querySelectorAll('.slide'));
+  var total = slides.length;
+  var deck = document.getElementById('deck');
+  var progressBar = document.getElementById('progressBar');
+  var counterCur = document.getElementById('counterCur');
+  var counterTotal = document.getElementById('counterTotal');
+  counterTotal.textContent = total;
+
+  var current = 0;
+  var overview = false;
+
+  function setOverview(on){
+    overview = on;
+    deck.classList.toggle('overview', on);
+    if (on){ history.replaceState(null, '', '#overview'); }
+    else { render(); }
+  }
+
+  // click: in overview, jump to the clicked slide; otherwise advance
+  // (except on links/buttons)
+  deck.addEventListener('click', function(e){
+    if (overview){
+      var s = e.target.closest('.slide');
+      if (s){ setOverview(false); go(slides.indexOf(s)); }
+      return;
+    }
+    if (e.target.closest('a, button')) return;
+    go(current + 1);
+  });
+
+  function clamp(i){ return Math.max(0, Math.min(total - 1, i)); }
+
+  function render(){
+    slides.forEach(function(s, i){ s.classList.toggle('active', i === current); });
+    counterCur.textContent = current + 1;
+    progressBar.style.width = (((current + 1) / total) * 100) + '%';
+    history.replaceState(null, '', '#' + (current + 1));
+  }
+
+  function go(i){
+    current = clamp(i);
+    render();
+  }
+
+  document.getElementById('prevBtn').addEventListener('click', function(){ go(current - 1); });
+  document.getElementById('nextBtn').addEventListener('click', function(){ go(current + 1); });
+
+  document.addEventListener('keydown', function(e){
+    if (e.key === 'Escape'){ setOverview(!overview); return; }
+    if (overview) return;
+    if (['ArrowRight','ArrowDown','PageDown',' '].indexOf(e.key) > -1){ go(current + 1); e.preventDefault(); }
+    else if (['ArrowLeft','ArrowUp','PageUp'].indexOf(e.key) > -1){ go(current - 1); e.preventDefault(); }
+    else if (e.key === 'Home'){ go(0); }
+    else if (e.key === 'End'){ go(total - 1); }
+    else if (e.key === 'n' || e.key === 'N'){ deck.classList.toggle('show-notes'); }
+  });
+
+  function initFromHash(){
+    if ((location.hash || '') === '#overview'){ setOverview(true); return; }
+    var h = parseInt((location.hash || '').replace('#',''), 10);
+    current = isNaN(h) ? 0 : clamp(h - 1);
+    render();
+  }
+  window.addEventListener('hashchange', initFromHash);
+
+  function scaleDeck(){
+    var sw = window.innerWidth / 1280;
+    var sh = window.innerHeight / 720;
+    var scale = Math.min(sw, sh, 1.3);
+    deck.style.transform = 'scale(' + scale + ')';
+  }
+  window.addEventListener('resize', scaleDeck);
+
+  initFromHash();
+  scaleDeck();
+})();
+</script>
+
+</body>
+</html>

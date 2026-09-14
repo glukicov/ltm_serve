@@ -82,7 +82,7 @@ latency no longer depends on context size (log-log slope 1.12 → 0.06).
 | FastAPI, continuous batcher, eager | 314 / 673 ms | ~285 req/s |
 | FastAPI, compiled | 97 / 137 ms | ~230 req/s |
 | Triton, 1 instance, eager | 273 / 380 ms | ~400 req/s |
-| Triton, 2 instances on the same GPU, eager | 266 / 410 ms | ~300 req/s |
+| Triton, 2 instances on the same GPU, eager | 266 / 410 ms | ≥300 req/s (4-process client) |
 | **Triton, 1 instance, compiled** | **91 / 125 ms** | **~350 req/s** |
 | Triton, 2 instances, compiled | 154 / 218 ms | ~320 req/s |
 
